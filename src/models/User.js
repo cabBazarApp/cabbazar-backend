@@ -1,7 +1,14 @@
 // src/models/User.js - Complete User Model
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import { OTP_CONFIG } from '../config/constants.js';
+// Replace named import (can throw if not exported) with namespace import and a safe fallback
+import * as constants from '../config/constants.js';
+
+const OTP_CONFIG = constants.OTP_CONFIG || {
+  EXPIRY_MINUTES: 10,
+  MAX_ATTEMPTS: 3,
+  RESEND_TIMEOUT_SECONDS: 60
+};
 
 const userSchema = new mongoose.Schema({
   phoneNumber: {

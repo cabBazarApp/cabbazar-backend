@@ -1,94 +1,83 @@
-// src/app.js - Express application configuration
 import express from 'express';
 import cors from 'cors';
-import morgan from 'morgan';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
+import morgan from 'morgan';
 import logger from './config/logger.js';
+import {loggerMiddleware, responseCaptureMiddelware} from './middleware/logger.js';
 import globalErrorHandler from './middleware/error.middleware.js';
+
+// Import routes
+import authRoutes from './routes/auth.routes.js';
+// Add other route imports here as needed
 
 // Initialize Express app
 const app = express();
 
-// Environment-based configuration
+// Environment variables
 const isProduction = process.env.NODE_ENV === 'production';
 
-// CORS configuration
-const corsOptions = {
-  origin: isProduction
-    ? ['https://your-production-domain.com'] // Update with production domains
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000'],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
-  exposedHeaders: ['set-cookie'],
-  optionsSuccessStatus: 200,
-};
-
-// Middleware stack
-app.use(
-  helmet({
-    contentSecurityPolicy: isProduction
-      ? {
-          directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"], // For GraphQL Playground
-            scriptSrc: ["'self'"],
-          },
-        }
-      : false,
-  })
-);
-app.use(cors(corsOptions));
-app.use(morgan(isProduction ? 'combined' : 'dev'));
-app.use(express.json({ limit: '50mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
+// Basic middleware setup
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(cookieParser());
+app.use(cors({
+  origin: isProduction 
+    ? ['https://your-production-domain.com']
+    : ['http://localhost:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
-// Health check endpoints
+// Security middleware
+app.use(helmet());
+app.use(morgan(isProduction ? 'combined' : 'dev'));
+
+// Custom middleware
+app.use(loggerMiddleware);
+app.use(responseCaptureMiddelware);
+
+// Health check route
 app.get('/health', (req, res) => {
   res.status(200).json({
-    success: true,
-    data: {
-      status: 'OK',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      environment: process.env.NODE_ENV || 'development',
-    },
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
+// API Routes - Version 1
+app.use('/api/auth', authRoutes);
+// Add other v1 routes here
 
+// API Routes - Version 2 (if needed)
+// app.use('/api/v2/...', ...);
 
-// Catch-all for undefined REST API routes
+// Catch undefined API routes
 app.all('/api/*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: `Route ${req.originalUrl} not found`,
-    suggestion: 'Use GraphQL endpoint at /graphql',
+    message: `Route ${req.originalUrl} not found`
   });
 });
 
 // Global error handler
 app.use(globalErrorHandler);
 
-// Fallback for non-API routes (excluding GraphQL)
-app.use('*', (req, res, next) => {
-  if (req.originalUrl.startsWith('/graphql')) {
-    return next();
-  }
+// Default route
+app.get('/', (req, res) => {
+  res.send(`<h1>Server is running. Environment: ${process.env.NODE_ENV}</h1>`);
+});
+
+// Catch all other routes
+app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: 'Page not found',
-    availableEndpoints: {
-      graphql: '/graphql',
-      health: '/health',
-      graphqlHealth: '/graphql/health',
-    },
+    message: 'Page not found'
   });
 });
 
-// Log application setup completion
 logger.info('Express application configured successfully');
 
 export default app;

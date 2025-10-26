@@ -194,7 +194,16 @@ const BOOKING_CONFIG = {
   ADVANCE_BOOKING_HOURS: 2
 };
 
-module.exports = {
+// --- START: OTP Configuration (added) ---
+const OTP_CONFIG = {
+  EXPIRY_MINUTES: Number(process.env.OTP_EXPIRY_MINUTES) || 10,
+  MAX_ATTEMPTS: Number(process.env.OTP_MAX_ATTEMPTS) || 3,
+  RESEND_TIMEOUT_SECONDS: Number(process.env.OTP_RESEND_TIMEOUT_SECONDS) || 60
+};
+// --- END: OTP Configuration ---
+
+// Replace CommonJS export with ES module named exports
+export {
   ENV,
   STATUS_CODES,
   MESSAGES,
@@ -212,5 +221,6 @@ module.exports = {
   VEHICLE_CAPACITY,
   VEHICLE_FEATURES,
   DISTANCE_CONFIG,
-  BOOKING_CONFIG
+  BOOKING_CONFIG,
+  OTP_CONFIG
 };

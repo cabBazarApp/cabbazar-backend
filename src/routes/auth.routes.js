@@ -3,7 +3,7 @@ import express from 'express';
 import { body } from 'express-validator';
 import * as authController from '../controllers/auth.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
-import validate from '../middleware/validation.middleware.js';
+import {validate} from '../middleware/validation.middleware.js';
 
 const router = express.Router();
 
@@ -95,13 +95,8 @@ const checkPhoneValidation = [
  * @desc    Send OTP to phone number
  * @access  Public
  */
-router.post('/otp', otpValidation, authController.sendOTP);
+router.post('/otp', authController.sendOTP);
 
-/**
- * @route   POST /api/auth/login
- * @desc    Verify OTP and login
- * @access  Public
- */
 router.post('/login', loginValidation, authController.login);
 
 /**

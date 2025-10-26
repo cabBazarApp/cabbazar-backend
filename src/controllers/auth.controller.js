@@ -2,7 +2,7 @@
 import User from '../models/User.js';
 import { sendSuccess } from '../utils/response.js';
 import { generateToken, setTokenCookie, clearTokenCookie } from '../middleware/auth.middleware.js';
-import catchAsync from '../utils/catchAsync.js';
+import {catchAsync} from '../utils/catchAsync.js';
 import { NotFoundError, BadRequestError, TooManyRequestsError } from '../utils/customError.js';
 import { maskPhoneNumber, maskEmail } from '../utils/helpers.js';
 import logger from '../config/logger.js';
@@ -58,11 +58,11 @@ export const sendOTP = catchAsync(async (req, res) => {
     expiresAt: user.otp.expiresAt
   });
 
-  // For development, return OTP in response (REMOVE IN PRODUCTION)
+  // For development, return OTP in res                                                                                ponse (REMOVE IN PRODUCTION)
   const responseData = process.env.NODE_ENV === 'development' 
     ? { 
         phoneNumber: maskPhoneNumber(phoneNumber), 
-        otp, // Remove this in production
+        otp, // Remove this in production 
         message: 'OTP sent successfully (Dev mode: OTP included in response)',
         expiresIn: '10 minutes'
       } 
