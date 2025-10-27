@@ -1,9 +1,12 @@
 // src/utils/seedData.js - Complete Database Seeder with Realistic Cab Data
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
-import { Vehicle, Driver } from '../models/Vehicle.js';
+// CORRECTED IMPORTS
+import Vehicle from '../models/Vehicle.js';
+import Driver from '../models/Driver.js';
 import User from '../models/User.js';
 import Booking from '../models/Booking.js';
+// END CORRECTED IMPORTS
 import { VEHICLE_TYPES, BOOKING_TYPES, BOOKING_STATUS } from '../config/constants.js';
 import logger from '../config/logger.js';
 

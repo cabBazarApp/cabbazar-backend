@@ -1,6 +1,6 @@
-// ===============================================
-
 // src/models/Driver.js - Complete Driver Model
+import mongoose from 'mongoose'; // <-- ADDED THIS IMPORT
+
 const driverSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -118,4 +118,4 @@ driverSchema.methods.updateLocation = async function(lat, lng) {
 
 const Driver = mongoose.model('Driver', driverSchema);
 
-export default { Driver };
+export default Driver; // <-- CHANGED THIS EXPORT

@@ -2,7 +2,7 @@
 import Booking from '../models/Booking.js';
 import User from '../models/User.js';
 import { sendSuccess, sendPaginatedResponse } from '../utils/response.js';
-import catchAsync from '../utils/catchAsync.js';
+import {catchAsync} from '../utils/catchAsync.js';
 import { BOOKING_STATUS } from '../config/constants.js';
 import { parsePagination } from '../utils/helpers.js';
 import logger from '../config/logger.js';

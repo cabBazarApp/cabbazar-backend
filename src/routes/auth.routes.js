@@ -1,9 +1,9 @@
-// src/routes/auth.routes.js - Complete Authentication Routes
+// src/routes/auth.routes.js - Clean Authentication Routes
 import express from 'express';
 import { body } from 'express-validator';
 import * as authController from '../controllers/auth.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
-import {validate} from '../middleware/validation.middleware.js';
+import { validate } from '../middleware/validation.middleware.js';
 
 const router = express.Router();
 
@@ -11,20 +11,35 @@ const router = express.Router();
 // VALIDATION RULES
 // ============================================
 
-const otpValidation = [
+// Phone number validation (Indian format)
+const phoneValidation = [
   body('phoneNumber')
     .trim()
     .notEmpty().withMessage('Phone number is required')
-    .isMobilePhone('en-IN').withMessage('Please provide a valid 10-digit Indian phone number')
+    .matches(/^[6-9]\d{9}$/).withMessage('Please provide a valid 10-digit Indian phone number')
     .isLength({ min: 10, max: 10 }).withMessage('Phone number must be exactly 10 digits'),
   validate
 ];
 
-const loginValidation = [
+// Send OTP validation
+const sendOtpValidation = [
   body('phoneNumber')
     .trim()
     .notEmpty().withMessage('Phone number is required')
-    .isMobilePhone('en-IN').withMessage('Please provide a valid phone number'),
+    .matches(/^[6-9]\d{9}$/).withMessage('Please provide a valid 10-digit Indian phone number'),
+  body('fcmToken')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('FCM token cannot be empty'),
+  validate
+];
+
+// Verify OTP validation
+const verifyOtpValidation = [
+  body('phoneNumber')
+    .trim()
+    .notEmpty().withMessage('Phone number is required')
+    .matches(/^[6-9]\d{9}$/).withMessage('Please provide a valid phone number'),
   body('otp')
     .trim()
     .notEmpty().withMessage('OTP is required')
@@ -33,56 +48,105 @@ const loginValidation = [
   validate
 ];
 
-const profileValidation = [
+// Registration validation
+const registerValidation = [
   body('name')
-    .optional()
     .trim()
-    .notEmpty().withMessage('Name cannot be empty')
-    .isLength({ min: 2, max: 50 }).withMessage('Name must be between 2 and 50 characters'),
+    .notEmpty().withMessage('Name is required')
+    .isLength({ min: 2, max: 50 }).withMessage('Name must be between 2 and 50 characters')
+    .matches(/^[a-zA-Z\s]+$/).withMessage('Name can only contain letters and spaces'),
   body('email')
     .optional()
     .trim()
     .isEmail().withMessage('Please provide a valid email address')
     .normalizeEmail(),
-  body('address.street').optional().trim(),
-  body('address.city').optional().trim(),
-  body('address.state').optional().trim(),
+  body('address.street')
+    .optional()
+    .trim()
+    .isLength({ max: 200 }).withMessage('Street address is too long'),
+  body('address.city')
+    .optional()
+    .trim()
+    .isLength({ max: 50 }).withMessage('City name is too long'),
+  body('address.state')
+    .optional()
+    .trim()
+    .isLength({ max: 50 }).withMessage('State name is too long'),
   body('address.pincode')
     .optional()
     .trim()
-    .isLength({ min: 6, max: 6 }).withMessage('Pincode must be 6 digits')
+    .isLength({ min: 6, max: 6 }).withMessage('Pincode must be exactly 6 digits')
     .isNumeric().withMessage('Pincode must contain only numbers'),
   body('preferences.language')
     .optional()
-    .isIn(['en', 'hi']).withMessage('Language must be either en or hi'),
+    .isIn(['en', 'hi']).withMessage('Language must be either "en" or "hi"'),
+  body('preferences.notifications.email')
+    .optional()
+    .isBoolean().withMessage('Email notification preference must be boolean'),
+  body('preferences.notifications.sms')
+    .optional()
+    .isBoolean().withMessage('SMS notification preference must be boolean'),
+  body('preferences.notifications.push')
+    .optional()
+    .isBoolean().withMessage('Push notification preference must be boolean'),
   validate
 ];
 
-const changePhoneValidation = [
-  body('newPhoneNumber')
+// Profile update validation
+const updateProfileValidation = [
+  body('name')
+    .optional()
     .trim()
-    .notEmpty().withMessage('New phone number is required')
-    .isMobilePhone('en-IN').withMessage('Please provide a valid phone number'),
-  body('otp')
+    .notEmpty().withMessage('Name cannot be empty')
+    .isLength({ min: 2, max: 50 }).withMessage('Name must be between 2 and 50 characters')
+    .matches(/^[a-zA-Z\s]+$/).withMessage('Name can only contain letters and spaces'),
+  body('email')
+    .optional()
     .trim()
-    .notEmpty().withMessage('OTP is required')
-    .isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
+    .isEmail().withMessage('Please provide a valid email address')
+    .normalizeEmail(),
+  body('address.street')
+    .optional()
+    .trim()
+    .isLength({ max: 200 }).withMessage('Street address is too long'),
+  body('address.city')
+    .optional()
+    .trim()
+    .isLength({ max: 50 }).withMessage('City name is too long'),
+  body('address.state')
+    .optional()
+    .trim()
+    .isLength({ max: 50 }).withMessage('State name is too long'),
+  body('address.pincode')
+    .optional()
+    .trim()
+    .isLength({ min: 6, max: 6 }).withMessage('Pincode must be exactly 6 digits')
+    .isNumeric().withMessage('Pincode must contain only numbers'),
+  body('preferences.language')
+    .optional()
+    .isIn(['en', 'hi']).withMessage('Language must be either "en" or "hi"'),
   validate
 ];
 
+// Delete account validation
 const deleteAccountValidation = [
   body('confirmPhoneNumber')
     .trim()
     .notEmpty().withMessage('Please confirm your phone number')
-    .isMobilePhone('en-IN').withMessage('Invalid phone number'),
+    .matches(/^[6-9]\d{9}$/).withMessage('Invalid phone number format'),
   validate
 ];
 
-const checkPhoneValidation = [
+// Resend OTP validation
+const resendOtpValidation = [
   body('phoneNumber')
     .trim()
     .notEmpty().withMessage('Phone number is required')
-    .isMobilePhone('en-IN').withMessage('Invalid phone number'),
+    .matches(/^[6-9]\d{9}$/).withMessage('Please provide a valid phone number'),
+  body('fcmToken')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('FCM token cannot be empty'),
   validate
 ];
 
@@ -91,56 +155,67 @@ const checkPhoneValidation = [
 // ============================================
 
 /**
- * @route   POST /api/auth/otp
+ * @route   POST /api/auth/send-otp
  * @desc    Send OTP to phone number
  * @access  Public
+ * @body    { phoneNumber: string, fcmToken?: string }
  */
-router.post('/otp', authController.sendOTP);
+router.post('/send_otp', authController.sendOtp);
 
-router.post('/login', loginValidation, authController.login);
+/**
+ * @route   POST /api/auth/verify-otp
+ * @desc    Verify OTP and authenticate user
+ * @access  Public
+ * @body    { phoneNumber: string, otp: string }
+ */
+router.post('/verify-otp', verifyOtpValidation, authController.verifyOtp);
 
 /**
  * @route   POST /api/auth/resend-otp
  * @desc    Resend OTP to phone number
  * @access  Public
+ * @body    { phoneNumber: string, fcmToken?: string }
  */
-router.post('/resend-otp', otpValidation, authController.resendOTP);
+router.post('/resend-otp', resendOtpValidation, authController.resendOtp);
 
 /**
  * @route   POST /api/auth/check-phone
- * @desc    Check if phone number exists
+ * @desc    Check if phone number exists in system
  * @access  Public
+ * @body    { phoneNumber: string }
  */
-router.post('/check-phone', checkPhoneValidation, authController.checkPhoneExists);
+router.post('/check-phone', phoneValidation, authController.checkPhoneExists);
 
 // ============================================
-// PROTECTED ROUTES (Authentication Required)
+// PRIVATE ROUTES (Authentication Required)
 // ============================================
 
 /**
- * @route   GET /api/auth/me
- * @desc    Get current user profile
+ * @route   POST /api/auth/register
+ * @desc    Complete user registration/profile after OTP verification
+ * @access  Private
+ * @body    { name: string, email?: string, address?: object, preferences?: object }
+ */
+router.post('/register', protect, registerValidation, authController.register);
+
+/**
+ * @route   GET /api/auth/user
+ * @desc    Get current authenticated user profile
  * @access  Private
  */
-router.get('/me', protect, authController.getMe);
+router.get('/user', protect, authController.getUser);
 
 /**
  * @route   PUT /api/auth/profile
  * @desc    Update user profile
  * @access  Private
+ * @body    { name?: string, email?: string, address?: object, preferences?: object }
  */
-router.put('/profile', protect, profileValidation, authController.updateProfile);
-
-/**
- * @route   POST /api/auth/change-phone
- * @desc    Change phone number
- * @access  Private
- */
-router.post('/change-phone', protect, changePhoneValidation, authController.changePhoneNumber);
+router.put('/profile', protect, updateProfileValidation, authController.updateProfile);
 
 /**
  * @route   POST /api/auth/logout
- * @desc    Logout user
+ * @desc    Logout user (clear cookies)
  * @access  Private
  */
 router.post('/logout', protect, authController.logout);
@@ -149,6 +224,7 @@ router.post('/logout', protect, authController.logout);
  * @route   DELETE /api/auth/account
  * @desc    Delete user account (soft delete)
  * @access  Private
+ * @body    { confirmPhoneNumber: string }
  */
 router.delete('/account', protect, deleteAccountValidation, authController.deleteAccount);
 

@@ -1,97 +1,31 @@
-// src/controllers/booking.controller.js - Complete with Socket.IO for Driver Acceptance
+// src/controllers/booking.controller.js - Simplified Booking Controller
 import Booking from '../models/Booking.js';
-import { Vehicle, Driver } from '../models/Vehicle.js';
 import User from '../models/User.js';
 import pricingService from '../services/pricing.service.js';
 import { sendSuccess, sendPaginatedResponse } from '../utils/response.js';
-import catchAsync from '../utils/catchAsync.js';
-import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../utils/customError.js';
-import { BOOKING_STATUS, BOOKING_TYPES, BOOKING_CONFIG } from '../config/constants.js';
-import { parsePagination, addDays, addHours, addMinutes } from '../utils/helpers.js';
+import { catchAsync } from '../utils/catchAsync.js';
+import {
+  NotFoundError,
+  BadRequestError,
+  ConflictError
+} from '../utils/customError.js';
+import {
+  BOOKING_STATUS,
+  BOOKING_TYPES,
+  BOOKING_CONFIG
+} from '../config/constants.js';
+import {
+  parsePagination,
+  addDays,
+  addHours,
+  generateBookingReference
+} from '../utils/helpers.js';
 import logger from '../config/logger.js';
-
-// Socket.IO instance (will be set from server.js)
-let io = null;
-
-/**
- * Set Socket.IO instance
- * @param {Object} socketIO - Socket.IO instance
- */
-export const setSocketIO = (socketIO) => {
-  io = socketIO;
-  logger.info('Socket.IO instance set for booking controller');
-};
-
-/**
- * Emit event to specific user
- */
-const emitToUser = (userId, event, data) => {
-  if (io) {
-    io.to(`user:${userId}`).emit(event, data);
-    logger.info('Socket event emitted', { userId, event });
-  }
-};
-
-/**
- * Emit event to specific driver
- */
-const emitToDriver = (driverId, event, data) => {
-  if (io) {
-    io.to(`driver:${driverId}`).emit(event, data);
-    logger.info('Socket event emitted to driver', { driverId, event });
-  }
-};
-
-/**
- * Broadcast booking request to available drivers
- */
-const broadcastToAvailableDrivers = async (booking, vehicleType) => {
-  if (!io) return;
-
-  try {
-    // Find available drivers with matching vehicle type
-    const availableDrivers = await Driver.find({
-      isAvailable: true,
-      isVerified: true
-    }).populate({
-      path: 'vehicleId',
-      match: { type: vehicleType, isAvailable: true }
-    });
-
-    const matchingDrivers = availableDrivers.filter(driver => driver.vehicleId);
-
-    logger.info('Broadcasting to available drivers', {
-      bookingId: booking.bookingId,
-      driversCount: matchingDrivers.length
-    });
-
-    // Emit to each driver
-    matchingDrivers.forEach(driver => {
-      io.to(`driver:${driver._id}`).emit('new-booking-request', {
-        bookingId: booking.bookingId,
-        booking: {
-          id: booking._id,
-          bookingId: booking.bookingId,
-          pickupLocation: booking.pickupLocation,
-          dropLocation: booking.dropLocation,
-          startDateTime: booking.startDateTime,
-          vehicleType: booking.vehicleType,
-          fareDetails: booking.fareDetails,
-          passengerDetails: {
-            name: booking.passengerDetails.name,
-            phone: booking.passengerDetails.phone
-          }
-        },
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000) // 5 minutes to accept
-      });
-    });
-
-    return matchingDrivers.length;
-  } catch (error) {
-    logger.error('Error broadcasting to drivers', { error: error.message });
-    return 0;
-  }
-};
+import {
+  sendBookingNotification,
+  sendDriverNotification,
+  sendTripNotification
+} from '../utils/notification.utils.js';
 
 /**
  * @desc    Search for available cabs and get pricing
@@ -99,7 +33,16 @@ const broadcastToAvailableDrivers = async (booking, vehicleType) => {
  * @access  Public
  */
 export const searchCabs = catchAsync(async (req, res) => {
-  const { from, to, date, type, distance, startDateTime, fromCoordinates, toCoordinates } = req.body;
+  const {
+    from,
+    to,
+    date,
+    type,
+    distance,
+    startDateTime,
+    fromCoordinates,
+    toCoordinates
+  } = req.body;
 
   // ========================================
   // VALIDATION
@@ -119,13 +62,13 @@ export const searchCabs = catchAsync(async (req, res) => {
 
   // Validate date (must be at least 2 hours in future)
   const tripDate = new Date(date || startDateTime);
-  
+
   if (isNaN(tripDate.getTime())) {
     throw new BadRequestError('Invalid date format');
   }
 
   const minBookingTime = addHours(new Date(), BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD);
-  
+
   if (tripDate < minBookingTime) {
     throw new BadRequestError(
       `Booking must be at least ${BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD} hours in advance`
@@ -133,7 +76,7 @@ export const searchCabs = catchAsync(async (req, res) => {
   }
 
   const maxBookingTime = addDays(new Date(), BOOKING_CONFIG.ADVANCE_BOOKING_DAYS);
-  
+
   if (tripDate > maxBookingTime) {
     throw new BadRequestError(
       `Cannot book more than ${BOOKING_CONFIG.ADVANCE_BOOKING_DAYS} days in advance`
@@ -155,7 +98,9 @@ export const searchCabs = catchAsync(async (req, res) => {
       );
       logger.info('Distance calculated from coordinates', { estimatedDistance });
     } catch (error) {
-      logger.warn('Failed to calculate distance from coordinates', { error: error.message });
+      logger.warn('Failed to calculate distance from coordinates', {
+        error: error.message
+      });
       estimatedDistance = 100; // Default fallback
     }
   }
@@ -164,10 +109,10 @@ export const searchCabs = catchAsync(async (req, res) => {
     estimatedDistance = 100; // Default fallback
   }
 
-  logger.info('Cab search initiated', { 
-    from, 
-    to, 
-    type, 
+  logger.info('Cab search initiated', {
+    from,
+    to,
+    type,
     distance: estimatedDistance,
     userId: req.user?._id || 'guest',
     tripDate: tripDate.toISOString()
@@ -183,35 +128,11 @@ export const searchCabs = catchAsync(async (req, res) => {
   });
 
   // ========================================
-  // CHECK ACTUAL VEHICLE AVAILABILITY (Optional)
-  // ========================================
-
-  // Get available vehicle counts
-  const vehicleAvailability = await Promise.all(
-    vehicleOptions.map(async (option) => {
-      const count = await Vehicle.countDocuments({
-        type: option.vehicleType,
-        isAvailable: true
-      });
-      return { vehicleType: option.vehicleType, availableCount: count };
-    })
-  );
-
-  // Add availability info to options
-  vehicleOptions.forEach(option => {
-    const availability = vehicleAvailability.find(
-      v => v.vehicleType === option.vehicleType
-    );
-    option.availableVehicles = availability?.availableCount || 0;
-    option.available = option.availableVehicles > 0;
-  });
-
-  // ========================================
   // RESPONSE
   // ========================================
 
   const searchResults = {
-    searchId: `SRCH${Date.now()}${Math.random().toString(36).substring(7)}`.toUpperCase(),
+    searchId: generateBookingReference(),
     from,
     to,
     date: tripDate,
@@ -225,8 +146,7 @@ export const searchCabs = catchAsync(async (req, res) => {
 
   logger.info('Search results generated', {
     searchId: searchResults.searchId,
-    optionsCount: vehicleOptions.length,
-    availableOptionsCount: vehicleOptions.filter(o => o.available).length
+    optionsCount: vehicleOptions.length
   });
 
   return sendSuccess(res, searchResults, 'Search results retrieved successfully', 200);
@@ -256,9 +176,14 @@ export const createBooking = catchAsync(async (req, res) => {
   // VALIDATION
   // ========================================
 
+  // Validate required fields
+  if (!bookingType || !pickupLocation || !startDateTime || !vehicleType || !fareDetails) {
+    throw new BadRequestError('Missing required booking information');
+  }
+
   // Validate booking date
   const tripDate = new Date(startDateTime);
-  
+
   if (isNaN(tripDate.getTime())) {
     throw new BadRequestError('Invalid start date/time');
   }
@@ -283,7 +208,7 @@ export const createBooking = catchAsync(async (req, res) => {
     userId: req.user._id,
     startDateTime: {
       $gte: new Date(tripDate.getTime() - 30 * 60 * 1000), // 30 min before
-      $lte: new Date(tripDate.getTime() + 30 * 60 * 1000)  // 30 min after
+      $lte: new Date(tripDate.getTime() + 30 * 60 * 1000) // 30 min after
     },
     status: { $nin: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.COMPLETED] }
   });
@@ -295,11 +220,11 @@ export const createBooking = catchAsync(async (req, res) => {
   }
 
   // Validate fare amount
-  if (!fareDetails || !fareDetails.finalAmount || fareDetails.finalAmount < 0) {
+  if (!fareDetails.finalAmount || fareDetails.finalAmount < 0) {
     throw new BadRequestError('Invalid fare details');
   }
 
-  logger.info('Creating new booking', { 
+  logger.info('Creating new booking', {
     userId: req.user._id,
     bookingType,
     vehicleType,
@@ -312,13 +237,18 @@ export const createBooking = catchAsync(async (req, res) => {
 
   const booking = await Booking.create({
     userId: req.user._id,
+    bookingId: generateBookingReference(),
     bookingType,
     pickupLocation,
     dropLocation,
     startDateTime: tripDate,
     endDateTime: endDateTime ? new Date(endDateTime) : null,
     vehicleType,
-    passengerDetails,
+    passengerDetails: passengerDetails || {
+      name: req.user.name,
+      phone: req.user.phoneNumber,
+      email: req.user.email
+    },
     fareDetails,
     status: BOOKING_STATUS.CONFIRMED,
     specialRequests: specialRequests || [],
@@ -334,7 +264,7 @@ export const createBooking = catchAsync(async (req, res) => {
   // Populate user details
   await booking.populate('userId', 'phoneNumber name email');
 
-  logger.info('Booking created successfully', { 
+  logger.info('Booking created successfully', {
     bookingId: booking.bookingId,
     userId: req.user._id,
     status: booking.status,
@@ -342,196 +272,44 @@ export const createBooking = catchAsync(async (req, res) => {
   });
 
   // ========================================
-  // REAL-TIME DRIVER NOTIFICATION
+  // SEND NOTIFICATIONS
   // ========================================
 
-  // Broadcast to available drivers via Socket.IO
-  const driversNotified = await broadcastToAvailableDrivers(booking, vehicleType);
+  // Send booking confirmation notification to user
+  if (req.user.deviceInfo && req.user.deviceInfo.length > 0) {
+    const fcmToken = req.user.deviceInfo[0].fcmToken;
 
-  // Emit to user
-  emitToUser(req.user._id, 'booking-created', {
-    bookingId: booking.bookingId,
-    status: booking.status,
-    driversNotified
-  });
+    if (fcmToken) {
+      sendBookingNotification(
+        fcmToken,
+        booking.bookingId,
+        'confirmed',
+        `Your booking ${booking.bookingId} is confirmed for ${tripDate.toLocaleDateString()}`
+      ).catch(error => {
+        logger.error('Failed to send booking confirmation notification', {
+          error: error.message
+        });
+      });
+    }
+  }
 
-  // ========================================
-  // ADDITIONAL ACTIONS (Production)
-  // ========================================
-
-  // TODO: Send confirmation SMS to user
-  // TODO: Send booking confirmation email
-  // TODO: Create payment intent if prepayment required
-  // TODO: Schedule driver assignment job (2 hours before trip)
+  // TODO: Send SMS confirmation
+  // TODO: Send email confirmation
+  // TODO: Notify nearby drivers
 
   return sendSuccess(
-    res, 
+    res,
     {
       booking,
-      driversNotified,
-      message: 'Your booking has been confirmed. Nearby drivers have been notified.'
-    }, 
-    'Booking created successfully', 
+      message: 'Your booking has been confirmed. You will receive driver details shortly.'
+    },
+    'Booking created successfully',
     201
   );
 });
 
 /**
- * @desc    Driver accepts booking request
- * @route   POST /api/bookings/:id/accept
- * @access  Private (Driver only)
- */
-export const acceptBookingByDriver = catchAsync(async (req, res) => {
-  const { driverId, estimatedArrival } = req.body;
-
-  if (!driverId) {
-    throw new BadRequestError('Driver ID is required');
-  }
-
-  // Find booking
-  const booking = await Booking.findById(req.params.id);
-
-  if (!booking) {
-    throw new NotFoundError('Booking not found');
-  }
-
-  // Check if already assigned
-  if (booking.status === BOOKING_STATUS.ASSIGNED) {
-    throw new ConflictError('This booking has already been accepted by another driver');
-  }
-
-  if (booking.status !== BOOKING_STATUS.CONFIRMED) {
-    throw new BadRequestError(`Cannot accept booking with status: ${booking.status}`);
-  }
-
-  // Verify driver exists and is available
-  const driver = await Driver.findById(driverId).populate('vehicleId');
-
-  if (!driver) {
-    throw new NotFoundError('Driver not found');
-  }
-
-  if (!driver.isAvailable) {
-    throw new BadRequestError('Driver is not available');
-  }
-
-  if (!driver.isVerified) {
-    throw new BadRequestError('Driver is not verified');
-  }
-
-  // Check if driver has matching vehicle type
-  if (!driver.vehicleId || driver.vehicleId.type !== booking.vehicleType) {
-    throw new BadRequestError('Driver vehicle type does not match booking requirement');
-  }
-
-  // ========================================
-  // ASSIGN DRIVER TO BOOKING
-  // ========================================
-
-  await booking.assignDriver(driverId, driver.vehicleId._id);
-
-  // Update driver availability
-  driver.isAvailable = false;
-  await driver.save();
-
-  logger.info('Booking accepted by driver', {
-    bookingId: booking.bookingId,
-    driverId: driver._id,
-    driverName: driver.name
-  });
-
-  // ========================================
-  // REAL-TIME NOTIFICATIONS
-  // ========================================
-
-  // Notify user via Socket.IO
-  emitToUser(booking.userId, 'driver-assigned', {
-    bookingId: booking.bookingId,
-    driver: {
-      id: driver._id,
-      name: driver.name,
-      phone: driver.phoneNumber,
-      rating: driver.rating,
-      vehicleNumber: driver.vehicleId.licensePlate,
-      vehicleModel: driver.vehicleId.modelName,
-      estimatedArrival
-    }
-  });
-
-  // Notify other drivers that booking is taken
-  if (io) {
-    io.emit('booking-assigned', {
-      bookingId: booking.bookingId,
-      message: 'This booking has been accepted by another driver'
-    });
-  }
-
-  // ========================================
-  // SEND NOTIFICATIONS
-  // ========================================
-
-  // TODO: Send SMS to user with driver details
-  // TODO: Send push notification to user
-  // TODO: Send confirmation to driver
-
-  // Populate full booking details
-  await booking.populate([
-    { path: 'userId', select: 'phoneNumber name email' },
-    { path: 'vehicleId' },
-    { path: 'driverId', select: 'name phoneNumber rating totalRides' }
-  ]);
-
-  return sendSuccess(
-    res,
-    {
-      booking,
-      message: 'Booking accepted successfully. Customer has been notified.'
-    },
-    'Booking accepted successfully',
-    200
-  );
-});
-
-/**
- * @desc    Driver rejects booking request
- * @route   POST /api/bookings/:id/reject
- * @access  Private (Driver only)
- */
-export const rejectBookingByDriver = catchAsync(async (req, res) => {
-  const { driverId, reason } = req.body;
-
-  if (!driverId) {
-    throw new BadRequestError('Driver ID is required');
-  }
-
-  const booking = await Booking.findById(req.params.id);
-
-  if (!booking) {
-    throw new NotFoundError('Booking not found');
-  }
-
-  logger.info('Booking rejected by driver', {
-    bookingId: booking.bookingId,
-    driverId,
-    reason
-  });
-
-  // Emit to specific driver that rejection was recorded
-  emitToDriver(driverId, 'booking-rejection-recorded', {
-    bookingId: booking.bookingId,
-    message: 'Rejection recorded'
-  });
-
-  return sendSuccess(
-    res,
-    { message: 'Rejection recorded. Booking will be offered to other drivers.' },
-    'Rejection recorded',
-    200
-  );
-});
-
-/**
- * @desc    Get booking by database ID
+ * @desc    Get booking by ID
  * @route   GET /api/bookings/:id
  * @access  Private
  */
@@ -545,16 +323,16 @@ export const getBooking = catchAsync(async (req, res) => {
     .populate('driverId', 'name phoneNumber rating totalRides');
 
   if (!booking) {
-    logger.warn('Booking not found', { 
+    logger.warn('Booking not found', {
       bookingId: req.params.id,
-      userId: req.user._id 
+      userId: req.user._id
     });
     throw new NotFoundError('Booking not found');
   }
 
-  logger.info('Booking retrieved', { 
+  logger.info('Booking retrieved', {
     bookingId: booking.bookingId,
-    userId: req.user._id 
+    userId: req.user._id
   });
 
   return sendSuccess(res, booking, 'Booking retrieved successfully', 200);
@@ -572,18 +350,18 @@ export const getBookingByCode = catchAsync(async (req, res) => {
   })
     .populate('userId', 'phoneNumber name email')
     .populate('vehicleId')
-    .populate('driverId', 'name phoneNumber rating totalRides currentLocation');
+    .populate('driverId', 'name phoneNumber rating totalRides');
 
   if (!booking) {
-    logger.warn('Booking not found by code', { 
+    logger.warn('Booking not found by code', {
       bookingId: req.params.bookingId,
-      userId: req.user._id 
+      userId: req.user._id
     });
     throw new NotFoundError('Booking not found');
   }
 
-  logger.info('Booking retrieved by code', { 
-    bookingId: booking.bookingId 
+  logger.info('Booking retrieved by code', {
+    bookingId: booking.bookingId
   });
 
   return sendSuccess(res, booking, 'Booking retrieved successfully', 200);
@@ -637,7 +415,7 @@ export const getAllBookings = catchAsync(async (req, res) => {
   // Get total count
   const total = await Booking.countDocuments(query);
 
-  logger.info('User bookings retrieved', { 
+  logger.info('User bookings retrieved', {
     userId: req.user._id,
     count: bookings.length,
     total,
@@ -672,145 +450,219 @@ export const cancelBooking = catchAsync(async (req, res) => {
   }
 
   // Check if booking can be cancelled
-  const { canCancel, reason: cancelReason, charge } = booking.canBeCancelled();
-
-  if (!canCancel) {
-    throw new BadRequestError(cancelReason);
+  if (![BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.ASSIGNED].includes(booking.status)) {
+    throw new BadRequestError(
+      `Cannot cancel booking with status: ${booking.status}`
+    );
   }
 
-  // Cancel the booking
-  await booking.cancelBooking('USER', reason || 'User requested cancellation');
+  // Calculate cancellation charge
+  const hoursUntilStart = (new Date(booking.startDateTime) - new Date()) / (1000 * 60 * 60);
 
-  // If driver was assigned, make driver available again
-  if (booking.driverId) {
-    const driver = await Driver.findById(booking.driverId);
-    if (driver) {
-      driver.isAvailable = true;
-      await driver.save();
+  let cancellationCharge = 0;
 
-      // Notify driver via Socket.IO
-      emitToDriver(driver._id, 'booking-cancelled', {
-        bookingId: booking.bookingId,
-        message: 'Customer cancelled the booking',
-        reason
+  if (hoursUntilStart < BOOKING_CONFIG.CANCELLATION_WINDOW_HOURS) {
+    cancellationCharge = Math.round(
+      (booking.fareDetails.finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT) / 100
+    );
+  }
+
+  // Update booking status
+  booking.status = BOOKING_STATUS.CANCELLED;
+  booking.cancellation = {
+    cancelledBy: 'USER',
+    cancelledAt: new Date(),
+    reason: reason || 'User requested cancellation',
+    charge: cancellationCharge
+  };
+
+  await booking.save();
+
+  logger.info('Booking cancelled', {
+    bookingId: booking.bookingId,
+    userId: req.user._id,
+    cancellationCharge,
+    reason
+  });
+
+  // ========================================
+  // SEND NOTIFICATIONS
+  // ========================================
+
+  // Notify user
+  if (req.user.deviceInfo && req.user.deviceInfo.length > 0) {
+    const fcmToken = req.user.deviceInfo[0].fcmToken;
+
+    if (fcmToken) {
+      sendBookingNotification(
+        fcmToken,
+        booking.bookingId,
+        'cancelled',
+        `Your booking ${booking.bookingId} has been cancelled. ${cancellationCharge > 0
+          ? `Cancellation charge: ₹${cancellationCharge}`
+          : 'No cancellation charge applied.'
+        }`
+      ).catch(error => {
+        logger.error('Failed to send cancellation notification', {
+          error: error.message
+        });
       });
     }
   }
 
-  logger.info('Booking cancelled', { 
-    bookingId: booking.bookingId,
-    userId: req.user._id,
-    cancellationCharge: charge,
-    reason
-  });
-
-  // Emit to user
-  emitToUser(req.user._id, 'booking-cancelled-confirmed', {
-    bookingId: booking.bookingId,
-    refundAmount: booking.fareDetails.finalAmount - charge
-  });
+  // Notify driver if assigned
+  if (booking.driverId) {
+    // TODO: Get driver's FCM token and send notification
+    logger.info('Driver should be notified of cancellation', {
+      driverId: booking.driverId._id
+    });
+  }
 
   // TODO: Process refund if applicable
   // TODO: Send cancellation confirmation SMS/email
 
+  const refundAmount = booking.fareDetails.finalAmount - cancellationCharge;
+
   return sendSuccess(
-    res, 
+    res,
     {
       booking,
-      cancellationCharge: charge,
-      refundAmount: booking.fareDetails.finalAmount - charge,
-      refundNote: charge > 0 
-        ? `₹${charge} cancellation charge will be deducted. Refund of ₹${booking.fareDetails.finalAmount - charge} will be processed within 5-7 business days.`
-        : 'Full refund will be processed within 5-7 business days.'
-    }, 
-    'Booking cancelled successfully', 
+      cancellationCharge,
+      refundAmount,
+      refundNote:
+        cancellationCharge > 0
+          ? `₹${cancellationCharge} cancellation charge applied. Refund of ₹${refundAmount} will be processed within 5-7 business days.`
+          : 'Full refund will be processed within 5-7 business days.'
+    },
+    'Booking cancelled successfully',
     200
   );
 });
 
 /**
- * @desc    Start trip (Driver)
- * @route   POST /api/bookings/:id/start
- * @access  Private (Driver)
+ * @desc    Update booking (modify details before confirmation)
+ * @route   PUT /api/bookings/:id
+ * @access  Private
  */
-export const startTrip = catchAsync(async (req, res) => {
-  const { startOdometer, driverId } = req.body;
+export const updateBooking = catchAsync(async (req, res) => {
+  const {
+    pickupLocation,
+    dropLocation,
+    startDateTime,
+    specialRequests,
+    notes
+  } = req.body;
 
-  const booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findOne({
+    _id: req.params.id,
+    userId: req.user._id
+  });
 
   if (!booking) {
     throw new NotFoundError('Booking not found');
   }
 
-  if (booking.driverId.toString() !== driverId) {
-    throw new BadRequestError('Only assigned driver can start the trip');
+  // Only allow updates for CONFIRMED status
+  if (booking.status !== BOOKING_STATUS.CONFIRMED) {
+    throw new BadRequestError(
+      'Only confirmed bookings can be updated. Current status: ' + booking.status
+    );
   }
 
-  await booking.startTrip(startOdometer);
+  // Update fields if provided
+  if (pickupLocation) booking.pickupLocation = pickupLocation;
+  if (dropLocation) booking.dropLocation = dropLocation;
+  if (startDateTime) {
+    const newDate = new Date(startDateTime);
 
-  logger.info('Trip started', {
-    bookingId: booking.bookingId,
-    driverId,
-    startOdometer
-  });
-
-  // Notify user
-  emitToUser(booking.userId, 'trip-started', {
-    bookingId: booking.bookingId,
-    startTime: booking.trip.actualStartTime,
-    driver: {
-      name: booking.driverId.name,
-      phone: booking.driverId.phoneNumber
+    if (isNaN(newDate.getTime())) {
+      throw new BadRequestError('Invalid start date/time');
     }
+
+    const minBookingTime = addHours(new Date(), BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD);
+
+    if (newDate < minBookingTime) {
+      throw new BadRequestError(
+        `Booking must be at least ${BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD} hours in advance`
+      );
+    }
+
+    booking.startDateTime = newDate;
+  }
+  if (specialRequests) booking.specialRequests = specialRequests;
+  if (notes) booking.notes = notes;
+
+  await booking.save();
+
+  logger.info('Booking updated', {
+    bookingId: booking.bookingId,
+    userId: req.user._id
   });
 
-  return sendSuccess(res, booking, 'Trip started successfully', 200);
+  return sendSuccess(res, booking, 'Booking updated successfully', 200);
 });
 
 /**
- * @desc    Complete trip (Driver)
- * @route   POST /api/bookings/:id/complete
- * @access  Private (Driver)
+ * @desc    Get upcoming bookings
+ * @route   GET /api/bookings/upcoming
+ * @access  Private
  */
-export const completeTrip = catchAsync(async (req, res) => {
-  const { endOdometer, driverId } = req.body;
+export const getUpcomingBookings = catchAsync(async (req, res) => {
+  const bookings = await Booking.find({
+    userId: req.user._id,
+    startDateTime: { $gte: new Date() },
+    status: { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.ASSIGNED] }
+  })
+    .sort({ startDateTime: 1 })
+    .limit(10)
+    .populate('vehicleId', 'type modelName licensePlate')
+    .populate('driverId', 'name phoneNumber rating');
 
-  const booking = await Booking.findById(req.params.id);
-
-  if (!booking) {
-    throw new NotFoundError('Booking not found');
-  }
-
-  if (booking.driverId.toString() !== driverId) {
-    throw new BadRequestError('Only assigned driver can complete the trip');
-  }
-
-  await booking.completeTrip(endOdometer);
-
-  // Make driver available again
-  const driver = await Driver.findById(driverId);
-  if (driver) {
-    driver.isAvailable = true;
-    driver.completedRides += 1;
-    await driver.save();
-  }
-
-  logger.info('Trip completed', {
-    bookingId: booking.bookingId,
-    driverId,
-    endOdometer,
-    actualDistance: booking.trip.actualDistance
+  logger.info('Upcoming bookings retrieved', {
+    userId: req.user._id,
+    count: bookings.length
   });
 
-  // Notify user
-  emitToUser(booking.userId, 'trip-completed', {
-    bookingId: booking.bookingId,
-    endTime: booking.trip.actualEndTime,
-    actualDistance: booking.trip.actualDistance,
-    finalAmount: booking.fareDetails.finalAmount
+  return sendSuccess(res, bookings, 'Upcoming bookings retrieved successfully', 200);
+});
+
+/**
+ * @desc    Get booking history
+ * @route   GET /api/bookings/history
+ * @access  Private
+ */
+export const getBookingHistory = catchAsync(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req.query);
+
+  const bookings = await Booking.find({
+    userId: req.user._id,
+    status: { $in: [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.CANCELLED] }
+  })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .populate('vehicleId', 'type modelName licensePlate')
+    .populate('driverId', 'name phoneNumber rating');
+
+  const total = await Booking.countDocuments({
+    userId: req.user._id,
+    status: { $in: [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.CANCELLED] }
   });
 
-  return sendSuccess(res, booking, 'Trip completed successfully', 200);
+  logger.info('Booking history retrieved', {
+    userId: req.user._id,
+    count: bookings.length,
+    total
+  });
+
+  return sendPaginatedResponse(
+    res,
+    bookings,
+    page,
+    limit,
+    total,
+    'Booking history retrieved successfully'
+  );
 });
 
 /**
@@ -842,26 +694,23 @@ export const addRating = catchAsync(async (req, res) => {
     throw new ConflictError('Booking has already been rated');
   }
 
-  await booking.addRating(rating, comment);
+  // Add rating to booking
+  booking.rating = {
+    value: rating,
+    comment: comment || '',
+    createdAt: new Date()
+  };
 
-  // Update driver rating
-  if (booking.driverId) {
-    await booking.driverId.updateRating(rating);
-    
-    // Notify driver
-    emitToDriver(booking.driverId._id, 'rating-received', {
-      bookingId: booking.bookingId,
-      rating,
-      comment,
-      newOverallRating: booking.driverId.rating
-    });
-  }
+  await booking.save();
 
   logger.info('Rating added to booking', {
     bookingId: booking.bookingId,
     rating,
     driverId: booking.driverId?._id
   });
+
+  // TODO: Update driver's overall rating
+  // TODO: Send thank you notification to user
 
   return sendSuccess(res, booking, 'Rating submitted successfully', 200);
 });
@@ -882,10 +731,14 @@ export const getBookingStats = catchAsync(async (req, res) => {
         $group: {
           _id: null,
           completed: {
-            $sum: { $cond: [{ $eq: ['$status', BOOKING_STATUS.COMPLETED] }, 1, 0] }
+            $sum: {
+              $cond: [{ $eq: ['$status', BOOKING_STATUS.COMPLETED] }, 1, 0]
+            }
           },
           cancelled: {
-            $sum: { $cond: [{ $eq: ['$status', BOOKING_STATUS.CANCELLED] }, 1, 0] }
+            $sum: {
+              $cond: [{ $eq: ['$status', BOOKING_STATUS.CANCELLED] }, 1, 0]
+            }
           },
           totalSpent: {
             $sum: {
@@ -917,27 +770,207 @@ export const getBookingStats = catchAsync(async (req, res) => {
       status: { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.ASSIGNED] }
     }),
     totalSpent: Math.round(stats[0]?.totalSpent || 0),
+    averageSpendPerBooking:
+      stats[0]?.completed > 0
+        ? Math.round(stats[0]?.totalSpent / stats[0]?.completed)
+        : 0,
     favoriteVehicleType: favoriteVehicle[0]?._id || null,
-    completionRate: totalBookings > 0
-      ? Math.round(((stats[0]?.completed || 0) / totalBookings) * 100)
-      : 0
+    completionRate:
+      totalBookings > 0
+        ? Math.round(((stats[0]?.completed || 0) / totalBookings) * 100)
+        : 0
   };
 
   return sendSuccess(res, result, 'Statistics retrieved successfully', 200);
 });
 
+/**
+ * @desc    Apply discount code to booking
+ * @route   POST /api/bookings/:id/apply-discount
+ * @access  Private
+ * @note    Placeholder function to fix crash
+ */
+export const applyDiscount = catchAsync(async (req, res) => {
+  const { discountCode } = req.body;
+
+  logger.info('Apply discount placeholder hit', {
+    bookingId: req.params.id,
+    userId: req.user._id,
+    discountCode
+  });
+
+  // TODO: Implement discount logic
+  // 1. Find booking
+  // 2. Validate discount code
+  // 3. Apply discount to fareDetails
+  // 4. Save booking
+
+  throw new BadRequestError('Discount functionality is not yet implemented.');
+});
+
+/**
+ * @desc    Get fare estimate for a route
+ * @route   POST /api/bookings/estimate
+ * @access  Public
+ */
+export const getFareEstimate = catchAsync(async (req, res) => {
+  const { from, to, type, distance, vehicleType, startDateTime } = req.body;
+
+  if (!type || !distance || !vehicleType) {
+    throw new BadRequestError('Booking type, distance, and vehicle type are required');
+  }
+
+  const tripDate = startDateTime ? new Date(startDateTime) : new Date();
+
+  let fareDetails;
+
+  // Calculate fare based on booking type
+  if (type === BOOKING_TYPES.ONE_WAY) {
+    fareDetails = pricingService.calculateOutstationFare(
+      vehicleType,
+      distance,
+      false,
+      tripDate
+    );
+  } else if (type === BOOKING_TYPES.ROUND_TRIP) {
+    fareDetails = pricingService.calculateOutstationFare(
+      vehicleType,
+      distance,
+      true,
+      tripDate
+    );
+  } else if (type === BOOKING_TYPES.LOCAL_8_80) {
+    fareDetails = pricingService.calculateLocalPackageFare(vehicleType, '8_80');
+  } else if (type === BOOKING_TYPES.LOCAL_12_120) {
+    fareDetails = pricingService.calculateLocalPackageFare(vehicleType, '12_120');
+  } else if (
+    type === BOOKING_TYPES.AIRPORT_PICKUP ||
+    type === BOOKING_TYPES.AIRPORT_DROP
+  ) {
+    fareDetails = pricingService.calculateAirportFare(vehicleType, distance, tripDate);
+  } else {
+    throw new BadRequestError('Invalid booking type');
+  }
+
+  logger.info('Fare estimate calculated', {
+    from,
+    to,
+    type,
+    vehicleType,
+    distance,
+    estimatedFare: fareDetails.finalAmount
+  });
+
+  return sendSuccess(
+    res,
+    {
+      from,
+      to,
+      fareDetails,
+      validUntil: addHours(new Date(), 1)
+    },
+    'Fare estimate calculated successfully',
+    200
+  );
+});
+
+// ADDED: getCancellationCharges function (placeholder)
+/**
+ * @desc    Get cancellation charges for a booking
+ * @route   GET /api/bookings/:id/cancellation-charges
+ * @access  Private
+ * @note    Placeholder function to fix crash
+ */
+export const getCancellationCharges = catchAsync(async (req, res) => {
+  const booking = await Booking.findOne({
+    _id: req.params.id,
+    userId: req.user._id
+  });
+
+  if (!booking) {
+    throw new NotFoundError('Booking not found');
+  }
+
+  // Calculate cancellation charge
+  const hoursUntilStart = (new Date(booking.startDateTime) - new Date()) / (1000 * 60 * 60);
+  let cancellationCharge = 0;
+
+  if (hoursUntilStart < BOOKING_CONFIG.CANCELLATION_WINDOW_HOURS) {
+    cancellationCharge = Math.round(
+      (booking.fareDetails.finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT) / 100
+    );
+  }
+
+  logger.info('Cancellation charges calculated', {
+    bookingId: booking.bookingId,
+    cancellationCharge
+  });
+
+  return sendSuccess(
+    res,
+    {
+      bookingId: booking.bookingId,
+      cancellationCharge,
+      hoursUntilStart,
+      cancellationWindowHours: BOOKING_CONFIG.CANCELLATION_WINDOW_HOURS,
+      chargePercent: BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT,
+      message: cancellationCharge > 0 
+        ? `A charge of ₹${cancellationCharge} will apply.`
+        : 'No cancellation charges will apply.'
+    },
+    'Cancellation charges retrieved successfully',
+    200
+  );
+});
+
+// ADDED: updateBookingStatus function (placeholder)
+/**
+ * @desc    Update booking status
+ * @route   PATCH /api/bookings/:id/status
+ * @access  Private
+ * @note    Placeholder function to fix crash
+ */
+export const updateBookingStatus = catchAsync(async (req, res) => {
+  const { status } = req.body;
+
+  const booking = await Booking.findOne({
+    _id: req.params.id,
+    userId: req.user._id
+  });
+
+  if (!booking) {
+    throw new NotFoundError('Booking not found');
+  }
+  
+  // TODO: Add logic to validate status transitions
+  // e.g., can only move from ASSIGNED to IN_PROGRESS
+
+  booking.status = status;
+  await booking.save();
+  
+  logger.info('Booking status updated', {
+    bookingId: booking.bookingId,
+    newStatus: status
+  });
+
+  return sendSuccess(res, booking, 'Booking status updated successfully', 200);
+});
+
 export default {
-  setSocketIO,
   searchCabs,
   createBooking,
-  acceptBookingByDriver,
-  rejectBookingByDriver,
   getBooking,
   getBookingByCode,
   getAllBookings,
   cancelBooking,
-  startTrip,
-  completeTrip,
+  updateBooking,
+  getUpcomingBookings,
+  getBookingHistory,
   addRating,
-  getBookingStats
+  getBookingStats,
+  applyDiscount, // Included
+  getFareEstimate,
+  getCancellationCharges, // Included
+  updateBookingStatus     // Included
 };
+

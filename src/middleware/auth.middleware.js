@@ -4,16 +4,11 @@ import User from '../models/User.js';
 import {catchAsync} from '../utils/catchAsync.js';
 import { AuthenticationError, AuthorizationError } from '../utils/customError.js';
 import logger from '../config/logger.js';
-import { ENV } from '../config/env.config.js';
+// We no longer import or run dotenv.config() here.
+// server.js is the single source of truth for loading and validating env vars.
 
-// Simplified JWT secret initialization using validated config
-const JWT_SECRET = ENV.JWT_SECRET;
-
-if (!JWT_SECRET) {
-  const msg = 'JWT_SECRET is not configured properly';
-  logger.error(msg);
-  throw new Error(msg);
-}
+// We can safely assume JWT_SECRET exists because server.js validates it at startup.
+const JWT_SECRET = process.env.JWT_SECRET;
 
 /**
  * Protect routes - Verify JWT token and authenticate user

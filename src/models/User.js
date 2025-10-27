@@ -1,20 +1,23 @@
-// src/models/User.js - Complete User Model
+// src/models/User.js
 import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs';
-// Replace named import (can throw if not exported) with namespace import and a safe fallback
+import bcrypt from 'bcryptjs'; // Reserved for future use (password hashing if needed)
+// Use namespace import with safe fallback
 import * as constants from '../config/constants.js';
 
+// OTP configuration (fallback if constants missing)
 const OTP_CONFIG = constants.OTP_CONFIG || {
   EXPIRY_MINUTES: 10,
   MAX_ATTEMPTS: 3,
   RESEND_TIMEOUT_SECONDS: 60
 };
 
+// ---------------------- Schema Definition ----------------------
+
 const userSchema = new mongoose.Schema({
   phoneNumber: {
     type: String,
     required: [true, 'Phone number is required'],
-    unique: true,
+    unique: true, // Creates a unique index automatically
     trim: true,
     match: [/^[6-9]\d{9}$/, 'Please provide a valid 10-digit Indian phone number']
   },
@@ -33,7 +36,7 @@ const userSchema = new mongoose.Schema({
   otp: {
     code: {
       type: String,
-      select: false // Don't include OTP in queries by default
+      select: false // Exclude OTP fields in default queries
     },
     expiresAt: {
       type: Date,
@@ -103,79 +106,68 @@ const userSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes for better query performance
-userSchema.index({ phoneNumber: 1 });
+// ---------------------- Indexes ----------------------
+
+// ✅ Removed duplicate phoneNumber index (unique already handles it)
 userSchema.index({ email: 1 });
 userSchema.index({ isActive: 1, isVerified: 1 });
 userSchema.index({ createdAt: -1 });
 
-// Virtual for full name
+// ---------------------- Virtuals ----------------------
+
 userSchema.virtual('fullName').get(function() {
   return this.name || 'User';
 });
 
-// Virtual for masked phone number
 userSchema.virtual('maskedPhone').get(function() {
   if (!this.phoneNumber) return '';
   return 'XXXXXX' + this.phoneNumber.slice(-4);
 });
 
+// ---------------------- Instance Methods ----------------------
+
 /**
- * Instance method to generate OTP
+ * Generate and assign OTP
  * @returns {string} Generated OTP
  */
 userSchema.methods.generateOTP = function() {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   const expiryMinutes = OTP_CONFIG.EXPIRY_MINUTES || 10;
-  
+
   this.otp = {
     code: otp,
     expiresAt: new Date(Date.now() + expiryMinutes * 60 * 1000),
     attempts: 0,
     lastRequestedAt: new Date()
   };
-  
+
   return otp;
 };
 
 /**
- * Instance method to verify OTP
- * @param {string} inputOTP - OTP to verify
- * @returns {boolean} True if OTP is valid
+ * Verify OTP
+ * @param {string} inputOTP
+ * @returns {boolean}
  */
 userSchema.methods.verifyOTP = function(inputOTP) {
-  // Check if OTP exists
-  if (!this.otp || !this.otp.code) {
-    return false;
-  }
+  if (!this.otp || !this.otp.code) return false;
+  if (new Date() > this.otp.expiresAt) return false;
+  if (this.otp.attempts >= (OTP_CONFIG.MAX_ATTEMPTS || 3)) return false;
 
-  // Check if OTP has expired
-  if (new Date() > this.otp.expiresAt) {
-    return false;
-  }
-
-  // Check if max attempts exceeded
-  if (this.otp.attempts >= (OTP_CONFIG.MAX_ATTEMPTS || 3)) {
-    return false;
-  }
-
-  // Increment attempts
   this.otp.attempts += 1;
-
-  // Verify OTP
   return this.otp.code === inputOTP;
 };
 
 /**
- * Instance method to clear OTP
+ * Clear OTP fields
  */
 userSchema.methods.clearOTP = function() {
   this.otp = undefined;
 };
 
 /**
- * Instance method to check if user can request OTP
- * @returns {Object} { canRequest: boolean, waitTime: number }
+ * Check if user can request new OTP
+ * @returns {{canRequest: boolean, waitTime: number}}
  */
 userSchema.methods.canRequestOTP = function() {
   if (!this.otp || !this.otp.lastRequestedAt) {
@@ -193,7 +185,7 @@ userSchema.methods.canRequestOTP = function() {
 };
 
 /**
- * Instance method to update last login
+ * Update last login timestamp
  */
 userSchema.methods.updateLastLogin = function() {
   this.lastLogin = new Date();
@@ -201,12 +193,12 @@ userSchema.methods.updateLastLogin = function() {
 };
 
 /**
- * Instance method to add device info
- * @param {Object} deviceInfo - Device information
+ * Add or update device info
+ * @param {Object} deviceInfo
  */
 userSchema.methods.addDevice = function(deviceInfo) {
   const existingDevice = this.deviceInfo.find(d => d.deviceId === deviceInfo.deviceId);
-  
+
   if (existingDevice) {
     existingDevice.lastUsed = new Date();
     existingDevice.fcmToken = deviceInfo.fcmToken || existingDevice.fcmToken;
@@ -220,54 +212,44 @@ userSchema.methods.addDevice = function(deviceInfo) {
   return this.save({ validateBeforeSave: false });
 };
 
-/**
- * Pre-save middleware to hash sensitive data if needed
- */
-userSchema.pre('save', async function(next) {
-  // If OTP is being set, ensure it's properly formatted
-  if (this.isModified('otp') && this.otp && this.otp.code) {
-    // OTP is stored in plain text for verification
-    // In production, you might want to hash it
-  }
+// ---------------------- Middleware ----------------------
 
+userSchema.pre('save', async function(next) {
+  // Future use: hash OTP or other sensitive data if needed
   next();
 });
 
-/**
- * Pre-find middleware to exclude inactive users by default
- */
 userSchema.pre(/^find/, function(next) {
-  // Uncomment to exclude inactive users from queries
+  // Optionally exclude inactive users globally
   // this.find({ isActive: { $ne: false } });
   next();
 });
 
+// ---------------------- Static Methods ----------------------
+
 /**
- * Static method to find user by phone number
- * @param {string} phoneNumber - Phone number to search
- * @returns {Promise<User>} User document
+ * Find user by phone number
  */
 userSchema.statics.findByPhoneNumber = function(phoneNumber) {
   return this.findOne({ phoneNumber });
 };
 
 /**
- * Static method to find verified users
- * @returns {Promise<User[]>} Array of verified users
+ * Find all verified active users
  */
 userSchema.statics.findVerified = function() {
   return this.find({ isVerified: true, isActive: true });
 };
 
 /**
- * Static method to count active users
- * @returns {Promise<number>} Count of active users
+ * Count total active users
  */
 userSchema.statics.countActive = function() {
   return this.countDocuments({ isActive: true });
 };
 
-// Create and export model
+// ---------------------- Model Export ----------------------
+
 const User = mongoose.model('User', userSchema);
 
 export default User;

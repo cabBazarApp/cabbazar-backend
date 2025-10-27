@@ -168,7 +168,7 @@ router.post('/search', searchValidation, bookingController.searchCabs);
  * @desc    Estimate fare for a trip
  * @access  Public
  */
-router.post('/estimate-fare', estimateFareValidation, bookingController.estimateFare);
+router.post('/estimate-fare', estimateFareValidation, bookingController.getFareEstimate);
 
 // ============================================
 // PROTECTED ROUTES
@@ -274,3 +274,4 @@ router.post(
 );
 
 export default router;
+

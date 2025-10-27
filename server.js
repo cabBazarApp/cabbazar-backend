@@ -1,39 +1,56 @@
 // server.js - Application entry point
 import dotenv from 'dotenv';
-import logger from './src/config/logger.js';
+import logger from './src/config/logger.js'; // Import logger
 import connectDB from './src/config/database.js';
-import app from './src/app.js';
 
-// Load environment variables with error handling
-const envConfig = dotenv.config();
-if (envConfig.error) {
-  console.error('❌ Failed to load .env file:', envConfig.error.message);
-  process.exit(1);
-}
+// --- 1. LOAD ENV VARS ---
+// MUST BE THE FIRST THING to run
+dotenv.config();
+logger.info('Environment variables loaded.');
 
-// Validate required environment variables
+// --- 2. VALIDATE ENV VARS ---
+// Now we can safely check process.env.
+// Added all required keys from your .env and firebase.js
 const requiredEnvVars = [
     'MONGO_URI',
     'PORT',
     'FIREBASE_PROJECT_ID',
     'FIREBASE_PRIVATE_KEY',
-    'FIREBASE_CLIENT_EMAIL'
+    'FIREBASE_CLIENT_EMAIL',
+    'JWT_SECRET',
+    'FIREBASE_PRIVATE_KEY_ID',
+    'FIREBASE_CLIENT_ID',
+    'FIREBASE_CLIENT_X509_CERT_URL'
 ];
+
+const missingVars = [];
 requiredEnvVars.forEach((varName) => {
   if (!process.env[varName]) {
-    console.error(`❌ Missing environment variable: ${varName}`);
-    process.exit(1);
+    missingVars.push(varName);
   }
 });
-logger.info('Environment variables loaded successfully');
-logger.info(`MONGO_URI: ${process.env.MONGO_URI}`);
+
+if (missingVars.length > 0) {
+    const errorMsg = `❌ Missing required environment variables: ${missingVars.join(', ')}`;
+    logger.error(errorMsg);
+    process.exit(1);
+}
+
+logger.info('All required environment variables are present and validated.');
 
 // Configuration
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 
-// Main server startup function
+// --- 3. MAIN SERVER STARTUP ---
+// We use an async function to allow for dynamic import
 const startServer = async () => {
   try {
+    // --- DYNAMICALLY IMPORT APP ---
+    // This is the fix: We import 'app.js' *after* dotenv.config() and validation.
+    // This ensures all env vars are loaded BEFORE app.js (and thus firebase.js) are imported.
+    const { default: app } = await import('./src/app.js');
+    logger.info('App modules imported successfully.');
+
     // Connect to MongoDB
     logger.info('Connecting to MongoDB...');
     await connectDB();
@@ -73,24 +90,24 @@ const startServer = async () => {
 
 // Global error handlers
 process.on('unhandledRejection', (err) => {
-  logger.error('❌ UNHANDLED REJECTION! Shutting down...', { error: err.message, stack: err.stack });
-  process.exit(1);
+  // Add check for null/undefined error
+  const error = err || new Error('Unknown unhandled rejection');
+  logger.error('❌ UNHANDLED REJECTION! Shutting down...', { error: error.message, stack: error.stack });
+  // Don't exit immediately, let the server handle shutdown if possible
 });
 
 process.on('uncaughtException', (err) => {
   logger.error('❌ UNCAUGHT EXCEPTION! Shutting down...', { error: err.message, stack: err.stack });
-  process.exit(1);
+  process.exit(1); // Uncaught exceptions are critical
 });
 
 // Start the application
 startServer()
   .then(() => {
-    logger.info('Server initialized successfully');
+    logger.info('Server initialization process completed.');
   })
   .catch((err) => {
     logger.error('❌ Server initialization failed:', err);
     process.exit(1);
   });
 
-// Export the app for testing or external use
-export default app;

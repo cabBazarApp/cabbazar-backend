@@ -10,7 +10,6 @@ import {
   VEHICLE_FEATURES,
   DISTANCE_CONFIG,
   BOOKING_CONFIG,
-  TIME
 } from '../config/constants.js';
 import { BadRequestError, ValidationError } from '../utils/customError.js';
 import { calculateGST, isNightTime } from '../utils/helpers.js';
