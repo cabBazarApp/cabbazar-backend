@@ -1,25 +1,22 @@
-// src/models/User.js
+// src/models/User.js - Updated without OTP fields
 import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs'; // Reserved for future use (password hashing if needed)
-// Use namespace import with safe fallback
-import * as constants from '../config/constants.js';
-
-// OTP configuration (fallback if constants missing)
-const OTP_CONFIG = constants.OTP_CONFIG || {
-  EXPIRY_MINUTES: 10,
-  MAX_ATTEMPTS: 3,
-  RESEND_TIMEOUT_SECONDS: 60
-};
-
-// ---------------------- Schema Definition ----------------------
+import jwt from 'jsonwebtoken';
 
 const userSchema = new mongoose.Schema({
   phoneNumber: {
     type: String,
     required: [true, 'Phone number is required'],
-    unique: true, // Creates a unique index automatically
+    unique: true,
     trim: true,
-    match: [/^[6-9]\d{9}$/, 'Please provide a valid 10-digit Indian phone number']
+    validate: {
+      validator: function(v) {
+        // Remove any spaces, hyphens, or plus signs
+        const cleaned = v.replace(/[\s\-+]/g, '');
+        // Check if it's a valid Indian number (with or without country code)
+        return /^(91)?[6-9]\d{9}$/.test(cleaned);
+      },
+      message: 'Please provide a valid Indian phone number'
+    }
   },
   name: {
     type: String,
@@ -33,24 +30,9 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address']
   },
-  otp: {
-    code: {
-      type: String,
-      select: false // Exclude OTP fields in default queries
-    },
-    expiresAt: {
-      type: Date,
-      select: false
-    },
-    attempts: {
-      type: Number,
-      default: 0,
-      select: false
-    },
-    lastRequestedAt: {
-      type: Date,
-      select: false
-    }
+  token: {
+    type: String,
+    select: false // Don't return token in queries by default
   },
   isVerified: {
     type: Boolean,
@@ -106,15 +88,12 @@ const userSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// ---------------------- Indexes ----------------------
-
-// ✅ Removed duplicate phoneNumber index (unique already handles it)
+// Indexes
 userSchema.index({ email: 1 });
 userSchema.index({ isActive: 1, isVerified: 1 });
 userSchema.index({ createdAt: -1 });
 
-// ---------------------- Virtuals ----------------------
-
+// Virtuals
 userSchema.virtual('fullName').get(function() {
   return this.name || 'User';
 });
@@ -124,78 +103,20 @@ userSchema.virtual('maskedPhone').get(function() {
   return 'XXXXXX' + this.phoneNumber.slice(-4);
 });
 
-// ---------------------- Instance Methods ----------------------
-
-/**
- * Generate and assign OTP
- * @returns {string} Generated OTP
- */
-userSchema.methods.generateOTP = function() {
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiryMinutes = OTP_CONFIG.EXPIRY_MINUTES || 10;
-
-  this.otp = {
-    code: otp,
-    expiresAt: new Date(Date.now() + expiryMinutes * 60 * 1000),
-    attempts: 0,
-    lastRequestedAt: new Date()
-  };
-
-  return otp;
+// Instance Methods
+userSchema.methods.getJWTToken = function() {
+  return jwt.sign(
+    { id: this._id }, 
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRE || '30d' }
+  );
 };
 
-/**
- * Verify OTP
- * @param {string} inputOTP
- * @returns {boolean}
- */
-userSchema.methods.verifyOTP = function(inputOTP) {
-  if (!this.otp || !this.otp.code) return false;
-  if (new Date() > this.otp.expiresAt) return false;
-  if (this.otp.attempts >= (OTP_CONFIG.MAX_ATTEMPTS || 3)) return false;
-
-  this.otp.attempts += 1;
-  return this.otp.code === inputOTP;
-};
-
-/**
- * Clear OTP fields
- */
-userSchema.methods.clearOTP = function() {
-  this.otp = undefined;
-};
-
-/**
- * Check if user can request new OTP
- * @returns {{canRequest: boolean, waitTime: number}}
- */
-userSchema.methods.canRequestOTP = function() {
-  if (!this.otp || !this.otp.lastRequestedAt) {
-    return { canRequest: true, waitTime: 0 };
-  }
-
-  const timeoutSeconds = OTP_CONFIG.RESEND_TIMEOUT_SECONDS || 60;
-  const timeSinceLastRequest = (Date.now() - this.otp.lastRequestedAt.getTime()) / 1000;
-  const waitTime = Math.max(0, timeoutSeconds - timeSinceLastRequest);
-
-  return {
-    canRequest: waitTime === 0,
-    waitTime: Math.ceil(waitTime)
-  };
-};
-
-/**
- * Update last login timestamp
- */
 userSchema.methods.updateLastLogin = function() {
   this.lastLogin = new Date();
   return this.save({ validateBeforeSave: false });
 };
 
-/**
- * Add or update device info
- * @param {Object} deviceInfo
- */
 userSchema.methods.addDevice = function(deviceInfo) {
   const existingDevice = this.deviceInfo.find(d => d.deviceId === deviceInfo.deviceId);
 
@@ -212,43 +133,18 @@ userSchema.methods.addDevice = function(deviceInfo) {
   return this.save({ validateBeforeSave: false });
 };
 
-// ---------------------- Middleware ----------------------
-
-userSchema.pre('save', async function(next) {
-  // Future use: hash OTP or other sensitive data if needed
-  next();
-});
-
-userSchema.pre(/^find/, function(next) {
-  // Optionally exclude inactive users globally
-  // this.find({ isActive: { $ne: false } });
-  next();
-});
-
-// ---------------------- Static Methods ----------------------
-
-/**
- * Find user by phone number
- */
+// Static Methods
 userSchema.statics.findByPhoneNumber = function(phoneNumber) {
   return this.findOne({ phoneNumber });
 };
 
-/**
- * Find all verified active users
- */
 userSchema.statics.findVerified = function() {
   return this.find({ isVerified: true, isActive: true });
 };
 
-/**
- * Count total active users
- */
 userSchema.statics.countActive = function() {
   return this.countDocuments({ isActive: true });
 };
-
-// ---------------------- Model Export ----------------------
 
 const User = mongoose.model('User', userSchema);
 

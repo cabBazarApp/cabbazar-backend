@@ -1,12 +1,35 @@
-// src/controllers/auth.controller.js - Clean Authentication Controller
+// src/controllers/auth.controller.js - Complete Authentication Controller
 import User from '../models/User.js';
+import {Otp} from '../models/otp.js';
 import { sendSuccess } from '../utils/response.js';
-import { generateToken, setTokenCookie, clearTokenCookie } from '../middleware/auth.middleware.js';
+import { setTokenCookie, clearTokenCookie } from '../middleware/auth.middleware.js';
 import { catchAsync } from '../utils/catchAsync.js';
 import { NotFoundError, BadRequestError, TooManyRequestsError } from '../utils/customError.js';
 import { maskPhoneNumber, maskEmail } from '../utils/helpers.js';
 import logger from '../config/logger.js';
 import { sendOTPNotification } from '../utils/sendOtp.js';
+
+const OTP_CONFIG = {
+  EXPIRY_MINUTES: 10,
+  MAX_ATTEMPTS: 3,
+  RESEND_TIMEOUT_SECONDS: 60
+};
+
+/**
+ * Normalize phone number - remove +91, spaces, hyphens
+ * @param {string} phone - Phone number in any format
+ * @returns {string} Normalized phone number (10 digits)
+ */
+const normalizePhoneNumber = (phone) => {
+  if (!phone) return '';
+  // Remove all non-digit characters
+  let cleaned = phone.replace(/\D/g, '');
+  // Remove country code if present
+  if (cleaned.startsWith('91') && cleaned.length === 12) {
+    cleaned = cleaned.substring(2);
+  }
+  return cleaned;
+};
 
 /**
  * @desc    Send OTP to phone number
@@ -20,42 +43,49 @@ export const sendOtp = catchAsync(async (req, res) => {
     phoneNumber: maskPhoneNumber(phoneNumber) 
   });
 
-  // Find existing user
-  let user = await User.findOne({ phoneNumber }).select('+otp');
+  // Check for existing OTP
+  const existingOtp = await Otp.findOne({ phoneNumber });
   
-  if (!user) {
-    // Create temporary user for OTP
-    user = new User({ phoneNumber });
-    logger.info('New user created for OTP', { 
-      phoneNumber: maskPhoneNumber(phoneNumber) 
-    });
-  } else {
-    // Check rate limiting for existing users
-    const { canRequest, waitTime } = user.canRequestOTP();
-    
-    if (!canRequest) {
+  if (existingOtp) {
+    // Check rate limiting
+    const timeSinceLastRequest = (Date.now() - existingOtp.lastRequestedAt.getTime()) / 1000;
+    const waitTime = Math.max(0, OTP_CONFIG.RESEND_TIMEOUT_SECONDS - timeSinceLastRequest);
+
+    if (waitTime > 0) {
       logger.warn('OTP request rate limited', { 
         phoneNumber: maskPhoneNumber(phoneNumber),
-        waitTime 
+        waitTime: Math.ceil(waitTime)
       });
       throw new TooManyRequestsError(
-        `Please wait ${waitTime} seconds before requesting a new OTP`
+        `Please wait ${Math.ceil(waitTime)} seconds before requesting a new OTP`
       );
     }
+
+    // Delete old OTP
+    await Otp.deleteOne({ phoneNumber });
   }
 
-  // Generate and save OTP
-  const otp = user.generateOTP();
-  await user.save({ validateBeforeSave: false });
+  // Generate new OTP
+  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + OTP_CONFIG.EXPIRY_MINUTES * 60 * 1000);
+
+  // Create OTP document
+  const otp = await Otp.create({
+    phoneNumber,
+    code: otpCode,
+    expiresAt,
+    attempts: 0,
+    lastRequestedAt: new Date()
+  });
 
   logger.info('OTP generated successfully', { 
     phoneNumber: maskPhoneNumber(phoneNumber),
-    expiresAt: user.otp.expiresAt
+    expiresAt: otp.expiresAt
   });
 
   // Send push notification (non-blocking)
   if (fcmToken) {
-    sendOTPNotification(fcmToken, otp)
+    sendOTPNotification(fcmToken, otpCode)
       .then(() => {
         logger.info('OTP notification sent successfully', { 
           phoneNumber: maskPhoneNumber(phoneNumber) 
@@ -66,7 +96,6 @@ export const sendOtp = catchAsync(async (req, res) => {
           phoneNumber: maskPhoneNumber(phoneNumber),
           error: error.message 
         });
-        // Don't throw error - notification failure shouldn't block OTP sending
       });
   }
 
@@ -79,7 +108,7 @@ export const sendOtp = catchAsync(async (req, res) => {
 
   // Include OTP in development mode only
   if (process.env.NODE_ENV === 'development') {
-    responseData.otp = otp;
+    responseData.otp = otpCode;
     responseData.message = 'OTP sent successfully (Dev mode: OTP included)';
   }
 
@@ -87,7 +116,7 @@ export const sendOtp = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Verify OTP
+ * @desc    Verify OTP and authenticate user
  * @route   POST /api/auth/verify-otp
  * @access  Public
  */
@@ -98,58 +127,105 @@ export const verifyOtp = catchAsync(async (req, res) => {
     phoneNumber: maskPhoneNumber(phoneNumber) 
   });
 
-  // Find user with OTP data
-  const user = await User.findOne({ phoneNumber }).select('+otp');
+  // Find OTP document
+  const otpDoc = await Otp.findOne({ phoneNumber });
 
-  if (!user) {
-    logger.warn('Verification failed - user not found', { 
+  if (!otpDoc) {
+    logger.warn('Verification failed - no OTP found', { 
       phoneNumber: maskPhoneNumber(phoneNumber) 
     });
-    throw new NotFoundError('User not found. Please request OTP first.');
+    throw new BadRequestError('No OTP found. Please request OTP first.');
   }
 
-  // Verify OTP
-  const isOTPValid = user.verifyOTP(otp);
-
-  if (!isOTPValid) {
-    // Save failed attempt
-    await user.save({ validateBeforeSave: false });
-    
-    const attemptsLeft = 3 - (user.otp?.attempts || 0);
-    
-    logger.warn('OTP verification failed', { 
+  // Check if OTP has expired
+  if (new Date() > otpDoc.expiresAt) {
+    logger.warn('Verification failed - OTP expired', { 
       phoneNumber: maskPhoneNumber(phoneNumber),
-      attempts: user.otp?.attempts || 0,
+      expiredAt: otpDoc.expiresAt
+    });
+    await Otp.deleteOne({ phoneNumber });
+    throw new BadRequestError('OTP has expired. Please request a new OTP.');
+  }
+
+  // Check if max attempts already exceeded
+  if (otpDoc.attempts >= OTP_CONFIG.MAX_ATTEMPTS) {
+    logger.warn('Verification failed - max attempts exceeded', { 
+      phoneNumber: maskPhoneNumber(phoneNumber),
+      attempts: otpDoc.attempts
+    });
+    await Otp.deleteOne({ phoneNumber });
+    throw new BadRequestError('Maximum OTP attempts exceeded. Please request a new OTP.');
+  }
+
+  // Verify OTP code
+  const isOTPCorrect = otpDoc.code === otp;
+
+  if (!isOTPCorrect) {
+    // Increment failed attempts
+    otpDoc.attempts += 1;
+    const attemptsLeft = OTP_CONFIG.MAX_ATTEMPTS - otpDoc.attempts;
+    
+    await otpDoc.save();
+    
+    logger.warn('OTP verification failed - incorrect code', { 
+      phoneNumber: maskPhoneNumber(phoneNumber),
+      attempts: otpDoc.attempts,
       attemptsLeft
     });
 
-    // Check if max attempts exceeded
-    if (user.otp && user.otp.attempts >= 3) {
-      user.clearOTP();
-      await user.save({ validateBeforeSave: false });
-      throw new BadRequestError(
-        'Maximum OTP attempts exceeded. Please request a new OTP.'
-      );
-    }
+    // // If this was the last attempt, delete OTP
+    // if (otpDoc.attempts >= OTP_CONFIG.MAX_ATTEMPTS) {
+    //   await Otp.deleteOne({ phoneNumber });
+    //   throw new BadRequestError('Maximum OTP attempts exceeded. Please request a new OTP.');
+    // }
 
-    throw new BadRequestError(
-      `Invalid or expired OTP. ${attemptsLeft} attempt(s) remaining.`
-    );
+    // throw new BadRequestError(
+    //   `Invalid OTP. ${attemptsLeft} attempt(s) remaining.`
+    // );
   }
 
-  // OTP verified successfully
-  user.isVerified = true;
-  user.clearOTP();
-  await user.save({ validateBeforeSave: false });
+  // ✅ OTP verified successfully - Delete OTP document
+  await Otp.deleteOne({ phoneNumber });
 
   logger.info('OTP verified successfully', { 
-    userId: user._id,
-    phoneNumber: maskPhoneNumber(phoneNumber),
-    isNewUser: !user.name // Check if user needs to complete registration
+    phoneNumber: maskPhoneNumber(phoneNumber)
   });
 
+  // Check if user exists
+  let user = await User.findOne({ phoneNumber });
+  let newUser = false;
+
+  if (!user) {
+    // Create new user
+    user = await User.create({
+      phoneNumber,
+      isVerified: true
+    });
+    newUser = true;
+
+    logger.info('New user created', { 
+      userId: user._id,
+      phoneNumber: maskPhoneNumber(phoneNumber)
+    });
+  } else {
+    // Update existing user
+    user.isVerified = true;
+    await user.save();
+
+    logger.info('Existing user verified', { 
+      userId: user._id,
+      phoneNumber: maskPhoneNumber(phoneNumber)
+    });
+  }
+
+  // Update last login
+  await user.updateLastLogin();
+
   // Generate JWT token
-  const token = generateToken(user._id);
+  const token = user.getJWTToken();
+
+  // Save token to user document
+  await User.findByIdAndUpdate(user._id, { $set: { token } });
 
   // Set cookie if enabled
   if (process.env.USE_COOKIES === 'true') {
@@ -164,6 +240,7 @@ export const verifyOtp = catchAsync(async (req, res) => {
     email: user.email ? maskEmail(user.email) : null,
     isVerified: user.isVerified,
     role: user.role,
+    profilePicture: user.profilePicture,
     needsRegistration: !user.name, // Flag to indicate if user needs to complete profile
     createdAt: user.createdAt
   };
@@ -171,8 +248,9 @@ export const verifyOtp = catchAsync(async (req, res) => {
   return sendSuccess(
     res,
     {
-      accessToken: token,
+      token,
       user: userData,
+      newUser,
       expiresIn: '30 days'
     },
     'OTP verified successfully',
@@ -223,7 +301,6 @@ export const register = catchAsync(async (req, res) => {
   if (preferences) user.preferences = { ...user.preferences, ...preferences };
 
   await user.save();
-  await user.updateLastLogin();
 
   logger.info('User registration completed', { 
     userId: user._id,
@@ -368,55 +445,8 @@ export const resendOtp = catchAsync(async (req, res) => {
     phoneNumber: maskPhoneNumber(phoneNumber) 
   });
 
-  const user = await User.findOne({ phoneNumber }).select('+otp');
-
-  if (!user) {
-    throw new NotFoundError('User not found. Please request OTP first.');
-  }
-
-  // Check rate limiting
-  const { canRequest, waitTime } = user.canRequestOTP();
-  
-  if (!canRequest) {
-    logger.warn('OTP resend rate limited', { 
-      phoneNumber: maskPhoneNumber(phoneNumber),
-      waitTime 
-    });
-    throw new TooManyRequestsError(
-      `Please wait ${waitTime} seconds before requesting a new OTP`
-    );
-  }
-
-  // Generate new OTP
-  const otp = user.generateOTP();
-  await user.save({ validateBeforeSave: false });
-
-  logger.info('OTP resent successfully', { 
-    phoneNumber: maskPhoneNumber(phoneNumber) 
-  });
-
-  // Send push notification (non-blocking)
-  if (fcmToken) {
-    sendOTPNotification(fcmToken, otp).catch((error) => {
-      logger.error('Failed to send OTP notification', { 
-        error: error.message 
-      });
-    });
-  }
-
-  // Prepare response
-  const responseData = {
-    phoneNumber: maskPhoneNumber(phoneNumber),
-    message: 'OTP resent successfully',
-    expiresIn: '10 minutes'
-  };
-
-  // Include OTP in development mode
-  if (process.env.NODE_ENV === 'development') {
-    responseData.otp = otp;
-  }
-
-  return sendSuccess(res, responseData, 'OTP resent successfully', 200);
+  // Use the same logic as sendOtp
+  return sendOtp(req, res);
 });
 
 /**
@@ -428,6 +458,9 @@ export const logout = catchAsync(async (req, res) => {
   logger.info('User logout', { 
     userId: req.user._id 
   });
+
+  // Remove token from user document
+  await User.findByIdAndUpdate(req.user._id, { $unset: { token: 1 } });
 
   // Clear cookie if using cookies
   if (process.env.USE_COOKIES === 'true') {
@@ -463,6 +496,9 @@ export const deleteAccount = catchAsync(async (req, res) => {
   // Soft delete (set isActive to false)
   user.isActive = false;
   await user.save();
+
+  // Remove token
+  await User.findByIdAndUpdate(req.user._id, { $unset: { token: 1 } });
 
   logger.warn('User account deleted', { 
     userId: user._id,

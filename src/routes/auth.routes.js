@@ -168,7 +168,7 @@ router.post('/send_otp', authController.sendOtp);
  * @access  Public
  * @body    { phoneNumber: string, otp: string }
  */
-router.post('/verify-otp', verifyOtpValidation, authController.verifyOtp);
+router.post('/verify_otp', authController.verifyOtp);
 
 /**
  * @route   POST /api/auth/resend-otp
