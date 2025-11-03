@@ -10,6 +10,8 @@ import logger from '../config/logger.js';
 import { sendOTPNotification } from '../utils/sendOtp.js';
 import { OTP_CONFIG } from '../config/constants.js'; // Import config from constants
 
+
+
 /**
  * @desc    Send OTP to phone number
  * @route   POST /api/auth/send-otp
