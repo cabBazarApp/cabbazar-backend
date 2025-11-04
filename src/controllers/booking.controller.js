@@ -72,40 +72,85 @@ function buildLocationObject(locationData) {
 /**
  * Get coordinates from address using Nominatim
  */
+/**
+ * Get coordinates from address using Nominatim - IMPROVED
+ */
 async function getCoordinatesFromAddressNominatim(address) {
   if (!address || typeof address !== 'string' || address.trim().length < 3) {
     logger.warn('Invalid address provided for Nominatim geocoding', { address });
     return null;
   }
+
+  // Normalize: ensure commas, trim, and add India if missing
+  let query = address.trim();
+  const hasIndia = /india|IN/i.test(query);
+  const hasUP = /uttar pradesh|UP/i.test(query);
+  const hasDelhi = /delhi/i.test(query);
+
+  // Add state/country if missing
+  if (!hasIndia) {
+    if (hasDelhi) {
+      query += ", Delhi, India";
+    } else if (hasUP) {
+      query += ", Uttar Pradesh, India";
+    } else {
+      query += ", India";
+    }
+  }
+
   const url = `https://nominatim.openstreetmap.org/search`;
   try {
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Rate limiting: 1 req/sec
+    await new Promise(resolve => setTimeout(resolve, 1100));
+
     const response = await axios.get(url, {
-      params: { q: address, format: 'json', limit: 1, countrycodes: 'in', addressdetails: 0 },
-      headers: { 'User-Agent': NOMINATIM_USER_AGENT },
-      timeout: 5000
+      params: {
+        q: query,
+        format: 'json',
+        limit: 1,
+        countrycodes: 'in',
+        addressdetails: 1,  // Now include for better matching
+        bounded: 1,
+        // Add structured search hints if needed
+      },
+      headers: {
+        'User-Agent': NOMINATIM_USER_AGENT,
+        'Referer': 'https://cabbazar.com' // Optional but helps
+      },
+      timeout: 8000
     });
+
     if (response.data && response.data.length > 0) {
       const result = response.data[0];
-      if (result.lat && result.lon && !isNaN(parseFloat(result.lat)) && !isNaN(parseFloat(result.lon))) {
-        const location = { lat: parseFloat(result.lat), lng: parseFloat(result.lon) };
-        logger.info('Nominatim Geocoding successful', { address, lat: location.lat, lng: location.lng });
+      const lat = parseFloat(result.lat);
+      const lon = parseFloat(result.lon);
+
+      if (!isNaN(lat) && !isNaN(lon)) {
+        const location = { lat, lng: lon };
+        logger.info('Nominatim Geocoding SUCCESS', {
+          original: address,
+          queryUsed: query,
+          result: { display_name: result.display_name, lat, lon }
+        });
         return location;
-      } else {
-        logger.warn('Nominatim returned result but lat/lon are invalid', { address, result });
-        return null;
       }
-    } else {
-      logger.warn('Nominatim Geocoding failed: No results found', { address });
-      return null;
     }
+
+    logger.warn('Nominatim: No valid lat/lon in results', {
+      original: address,
+      queryUsed: query,
+      resultsCount: response.data.length
+    });
+    return null;
+
   } catch (error) {
     const isTimeout = error.code === 'ECONNABORTED';
-    logger.error(`Error calling Nominatim API ${isTimeout ? '(Timeout)' : ''}`, {
-      address,
-      url: url + `?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=in`,
-      error: error.response ? { status: error.response.status, data: error.response.data } : error.message,
-      isTimeout
+    logger.error(`Nominatim API Error ${isTimeout ? '(Timeout)' : ''}`, {
+      original: address,
+      queryUsed: query,
+      error: error.response
+        ? { status: error.response.status, data: error.response.data }
+        : error.message
     });
     return null;
   }
@@ -583,7 +628,7 @@ export const createBooking = catchAsync(async (req, res) => {
 export const getBooking = catchAsync(async (req, res) => {
   const bookingDbId = req.params.id;
   console.log("Booking DB ID:", bookingDbId);
-  
+
   const booking = await Booking.findOne({
     _id: bookingDbId,
     userId: req.user._id
@@ -593,7 +638,7 @@ export const getBooking = catchAsync(async (req, res) => {
     .populate({
       path: 'driverId',
       select: 'name phoneNumber rating completedRides profilePicture vehicleId',
-      model: 'User'  
+      model: 'User'
     });
 
   if (!booking) {
