@@ -1,5 +1,5 @@
-// src/controllers/booking.controller.js - Updated with Local Package Logic
-import axios from 'axios'; // Import axios
+// src/controllers/booking.controller.js - FIXED VERSION (No Frontend Coordinates)
+import axios from 'axios';
 import Booking from '../models/Booking.js';
 import User from '../models/User.js';
 import pricingService from '../services/pricing.service.js';
@@ -10,7 +10,7 @@ import {
   BadRequestError,
   ConflictError,
   ServiceUnavailableError,
-  AuthorizationError // Added for status update
+  AuthorizationError
 } from '../utils/customError.js';
 import {
   BOOKING_STATUS,
@@ -39,206 +39,40 @@ const NOMINATIM_USER_AGENT = process.env.NOMINATIM_USER_AGENT || 'CabBazarBacken
 const OSRM_API_BASE_URL = 'http://router.project-osrm.org';
 
 const localRentalTypes = [
-  BOOKING_TYPES.LOCAL_2_20,   
-  BOOKING_TYPES.LOCAL_4_40,   
+  BOOKING_TYPES.LOCAL_2_20,
+  BOOKING_TYPES.LOCAL_4_40,
   BOOKING_TYPES.LOCAL_8_80,
   BOOKING_TYPES.LOCAL_12_120
 ];
 
+// ========================================
+// HELPER FUNCTIONS
+// ========================================
 
 /**
- * @desc    Search for available cabs and get pricing (Updated)
- * @route   POST /api/bookings/search
- * @access  Public
+ * Build clean location object for database
+ * FIXED: Frontend doesn't send coordinates, we only store city and address
  */
-export const searchCabs = catchAsync(async (req, res) => {
-  const {
-    from,
-    to,
-    date,
-    type,
-    distance,
-    startDateTime,
-    fromCoordinates,
-    toCoordinates
-  } = req.body;
-
-  // ========================================
-  // VALIDATION
-  // ========================================
-
-  if (!from || !to) {
-    throw new BadRequestError('Pickup (from) and drop-off (to) locations are required');
+function buildLocationObject(locationData) {
+  if (!locationData || !locationData.city) {
+    throw new BadRequestError('Location must have at least a city');
   }
 
-  if (!type) {
-    throw new BadRequestError('Booking type is required');
-  }
-
-  if (!Object.values(BOOKING_TYPES).includes(type)) {
-    throw new BadRequestError(`Invalid booking type: ${type}`);
-  }
-
-  // --- NAYA LOGIC: Check if it's a local rental ---
-  const isLocalRental = localRentalTypes.includes(type);
-
-  const tripDate = new Date(date || startDateTime);
-  if (isNaN(tripDate.getTime())) {
-    throw new BadRequestError('Invalid date format');
-  }
-  const minBookingTime = addHours(new Date(), BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD);
-  if (tripDate < minBookingTime) {
-    throw new BadRequestError(
-      `Booking must be at least ${BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD} hours in advance`
-    );
-  }
-  const maxBookingTime = addDays(new Date(), BOOKING_CONFIG.ADVANCE_BOOKING_DAYS);
-  if (tripDate > maxBookingTime) {
-    throw new BadRequestError(
-      `Cannot book more than ${BOOKING_CONFIG.ADVANCE_BOOKING_DAYS} days in advance`
-    );
-  }
-
-  // ========================================
-  // DISTANCE CALCULATION (Updated for Local Rentals)
-  // ========================================
-
-  let estimatedDistance = distance;
-  let originCoords = fromCoordinates;
-  let destinationCoords = toCoordinates;
-  let distanceSource = 'user_provided';
-
-  if (isLocalRental) {
-    // --- NAYA LOGIC: Agar local rental hai, distance calculation skip karo ---
-    logger.info('Local rental type detected, skipping distance calculation.', { type });
-    estimatedDistance = 0; // Distance 0 set karo
-    distanceSource = 'local_package';
-    if (!originCoords) originCoords = { note: "Local rental, coords not needed" };
-    if (!destinationCoords) destinationCoords = { note: "Local rental, coords not needed" };
-
-  } else if (estimatedDistance && typeof estimatedDistance === 'number' && estimatedDistance > 0) {
-    // Puraana logic: Agar distance diya hai toh use karo
-    logger.info('Distance provided directly in request', { estimatedDistance });
-    distanceSource = 'user_provided_distance';
-    if (!originCoords) originCoords = { note: "Coordinates not determined as distance was provided" };
-    if (!destinationCoords) destinationCoords = { note: "Coordinates not determined as distance was provided" };
-
-  } else {
-    // Puraana logic: Agar distance nahi diya (aur local bhi nahi hai) toh calculate karo
-    logger.info('Distance not provided/invalid, attempting geocoding (Nominatim) and routing (OSRM)...');
-    distanceSource = 'api_calculated';
-
-    // 1. Get Coordinates if not provided directly
-    if (!originCoords || typeof originCoords.lat !== 'number' || typeof originCoords.lng !== 'number') {
-      logger.info('Origin coordinates missing or invalid, calling Nominatim for "from" address', { from });
-      originCoords = await getCoordinatesFromAddressNominatim(from);
-      if (!originCoords) {
-        throw new BadRequestError(`Could not find coordinates for pickup location: "${from}". Please check the address, add more details (like city/state), or provide coordinates directly.`);
-      }
-    } else {
-      logger.info('Origin coordinates provided directly.', { originCoords });
-      distanceSource = 'user_provided_coordinates';
-    }
-
-    if (!destinationCoords || typeof destinationCoords.lat !== 'number' || typeof destinationCoords.lng !== 'number') {
-      logger.info('Destination coordinates missing or invalid, calling Nominatim for "to" address', { to });
-      destinationCoords = await getCoordinatesFromAddressNominatim(to);
-      if (!destinationCoords) {
-        throw new BadRequestError(`Could not find coordinates for drop-off location: "${to}". Please check the address, add more details (like city/state), or provide coordinates directly.`);
-      }
-    } else {
-      logger.info('Destination coordinates provided directly.', { destinationCoords });
-      if (distanceSource !== 'user_provided_distance') distanceSource = 'user_provided_coordinates';
-    }
-
-    // 2. Get Driving Distance from Coordinates using OSRM
-    logger.info('Calling OSRM for driving distance', { originCoords, destinationCoords });
-    estimatedDistance = await getDrivingDistanceOSRM(originCoords, destinationCoords);
-
-    if (estimatedDistance === null || estimatedDistance < 0) { // Allow 0 for same city
-      logger.warn('OSRM failed to return a valid distance, falling back to straight-line calculation.', { originCoords, destinationCoords });
-      try {
-        estimatedDistance = pricingService.calculateDistanceFromCoordinates(originCoords, destinationCoords);
-        distanceSource = 'api_fallback_straight_line';
-        if (estimatedDistance === null || estimatedDistance < 0) {
-          throw new Error("Straight-line distance also invalid.");
-        }
-      } catch (straightLineError) {
-        logger.error("Both OSRM and straight-line distance calculation failed.", { error: straightLineError.message });
-        throw new ServiceUnavailableError('Could not determine the driving distance between the locations. Please try again.');
-      }
-    } else {
-      if (distanceSource !== 'user_provided_coordinates') {
-        distanceSource = 'api_osrm';
-      } else {
-        distanceSource = 'api_osrm_from_user_coords';
-      }
-      logger.info('Distance calculated via OSRM API', { estimatedDistance });
-    }
-  }
-
-  // --- NAYA LOGIC: Final check on distance value ---
-  // Local rental (0km) aur Airport (0km base price) ke liye 0 distance allowed hai.
-  const isAirportTransfer = (type === BOOKING_TYPES.AIRPORT_DROP || type === BOOKING_TYPES.AIRPORT_PICKUP);
-
-  if (!isLocalRental && !isAirportTransfer && (!estimatedDistance || typeof estimatedDistance !== 'number' || estimatedDistance <= 0)) {
-    // Sirf ONE_WAY aur ROUND_TRIP ke liye 0 se zyada distance zaroori hai
-    logger.error("Final estimated distance is invalid for non-local/non-airport trip.", { estimatedDistance, type });
-    throw new BadRequestError('Could not determine a valid distance for this search.');
-  }
-
-  // (estimatedDistance 0 ho sakta hai local aur airport ke liye)
-
-  logger.info('Cab search initiated', {
-    from,
-    to,
-    type,
-    distance: estimatedDistance,
-    distanceSource,
-    userId: req.user?._id || 'guest',
-    tripDate: tripDate.toISOString()
-  });
-
-  // ========================================
-  // GET VEHICLE OPTIONS WITH PRICING
-  // ========================================
-
-  const vehicleOptions = pricingService.getVehicleOptions(type, {
-    distance: estimatedDistance, // 0 pass hoga local/airport ke liye
-    startDateTime: tripDate
-    // Pass extras if needed for local packages, e.g., extras: req.body.extras
-  });
-
-  // ========================================
-  // RESPONSE
-  // ========================================
-
-  const searchResults = {
-    searchId: generateBookingReference(),
-    from,
-    to,
-    date: tripDate,
-    type,
-    distance: estimatedDistance,
-    distanceSource,
-    options: vehicleOptions,
-    validUntil: addHours(new Date(), 1),
-    timestamp: new Date(),
-    hasCoordinatesInput: !!(req.body.fromCoordinates && req.body.toCoordinates)
+  const location = {
+    city: locationData.city.trim(),
+    address: locationData.address ? locationData.address.trim() : undefined
   };
 
-  logger.info('Search results generated', {
-    searchId: searchResults.searchId,
-    optionsCount: vehicleOptions.length,
-    distance: estimatedDistance,
-    distanceSource
-  });
+  // Coordinates are NOT expected from frontend
+  // They are only added internally if we fetch them via geocoding
+  // This function just stores what frontend sends (city + address only)
 
-  return sendSuccess(res, searchResults, 'Search results retrieved successfully', 200);
-});
+  return location;
+}
 
-
-// --- Helper Functions for Nominatim & OSRM (Unchanged) ---
+/**
+ * Get coordinates from address using Nominatim
+ */
 async function getCoordinatesFromAddressNominatim(address) {
   if (!address || typeof address !== 'string' || address.trim().length < 3) {
     logger.warn('Invalid address provided for Nominatim geocoding', { address });
@@ -278,18 +112,24 @@ async function getCoordinatesFromAddressNominatim(address) {
   }
 }
 
+/**
+ * Get driving distance using OSRM
+ */
 async function getDrivingDistanceOSRM(origin, destination) {
-  if (!origin || !destination || typeof origin.lat !== 'number' || typeof origin.lng !== 'number' || typeof destination.lat !== 'number' || typeof destination.lng !== 'number') {
+  if (!origin || !destination || typeof origin.lat !== 'number' || typeof origin.lng !== 'number' ||
+    typeof destination.lat !== 'number' || typeof destination.lng !== 'number') {
     logger.warn('Invalid coordinates provided for OSRM routing', { origin, destination });
     return null;
   }
-  // NAYA: Agar coordinates same hain, 0 return karo
+
   if (origin.lat === destination.lat && origin.lng === destination.lng) {
     logger.info('OSRM: Origin and destination are identical, returning 0 km.');
     return 0;
   }
+
   const coordinates = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
   const url = `${OSRM_API_BASE_URL}/route/v1/driving/${coordinates}`;
+
   try {
     await new Promise(resolve => setTimeout(resolve, 300));
     const response = await axios.get(url, {
@@ -297,18 +137,18 @@ async function getDrivingDistanceOSRM(origin, destination) {
       headers: { 'User-Agent': NOMINATIM_USER_AGENT },
       timeout: 7000
     });
+
     if (response.data && response.data.code === 'Ok' && response.data.routes && response.data.routes.length > 0) {
       const route = response.data.routes[0];
       if (route.distance !== undefined && typeof route.distance === 'number' && route.distance >= 0) {
         const distanceInMeters = route.distance;
         const distanceInKm = Math.round((distanceInMeters / 1000) * 10) / 10;
         logger.info('OSRM Driving distance obtained', { distanceInKm });
-        
-        // Agar distance 0 hai (bohot paas ke points), toh 0 return karo
+
         if (distanceInKm === 0 && (origin.lat !== destination.lat || origin.lng !== destination.lng)) {
           logger.warn('OSRM returned 0 distance for different coordinates, returning 0.', { origin, destination });
         }
-        return distanceInKm; // 0 bhi valid hai
+        return distanceInKm;
       } else {
         logger.warn('OSRM returned OK but route distance value is missing or invalid', { responseData: response.data });
         return null;
@@ -334,11 +174,181 @@ async function getDrivingDistanceOSRM(origin, destination) {
   }
 }
 
+// ========================================
+// CONTROLLER FUNCTIONS
+// ========================================
 
 /**
- * @desc    Create a new booking (Updated)
+ * @desc    Search for available cabs and get pricing
+ * @route   POST /api/bookings/search
+ * @access  Public
+ */
+export const searchCabs = catchAsync(async (req, res) => {
+  const {
+    from,
+    to,
+    date,
+    type,
+    distance,
+    startDateTime,
+    fromCoordinates,
+    toCoordinates
+  } = req.body;
+
+  // Validation
+  if (!from || !to) {
+    throw new BadRequestError('Pickup (from) and drop-off (to) locations are required');
+  }
+
+  if (!type) {
+    throw new BadRequestError('Booking type is required');
+  }
+
+  if (!Object.values(BOOKING_TYPES).includes(type)) {
+    throw new BadRequestError(`Invalid booking type: ${type}`);
+  }
+
+  const isLocalRental = localRentalTypes.includes(type);
+
+  const tripDate = new Date(date || startDateTime);
+  if (isNaN(tripDate.getTime())) {
+    throw new BadRequestError('Invalid date format');
+  }
+  const minBookingTime = addHours(new Date(), BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD);
+  if (tripDate < minBookingTime) {
+    throw new BadRequestError(
+      `Booking must be at least ${BOOKING_CONFIG.MIN_BOOKING_HOURS_AHEAD} hours in advance`
+    );
+  }
+  const maxBookingTime = addDays(new Date(), BOOKING_CONFIG.ADVANCE_BOOKING_DAYS);
+  if (tripDate > maxBookingTime) {
+    throw new BadRequestError(
+      `Cannot book more than ${BOOKING_CONFIG.ADVANCE_BOOKING_DAYS} days in advance`
+    );
+  }
+
+  // Distance calculation
+  let estimatedDistance = distance;
+  let originCoords = fromCoordinates;
+  let destinationCoords = toCoordinates;
+  let distanceSource = 'user_provided';
+
+  if (isLocalRental) {
+    logger.info('Local rental type detected, skipping distance calculation.', { type });
+    estimatedDistance = 0;
+    distanceSource = 'local_package';
+    if (!originCoords) originCoords = { note: "Local rental, coords not needed" };
+    if (!destinationCoords) destinationCoords = { note: "Local rental, coords not needed" };
+
+  } else if (estimatedDistance && typeof estimatedDistance === 'number' && estimatedDistance > 0) {
+    logger.info('Distance provided directly in request', { estimatedDistance });
+    distanceSource = 'user_provided_distance';
+    if (!originCoords) originCoords = { note: "Coordinates not determined as distance was provided" };
+    if (!destinationCoords) destinationCoords = { note: "Coordinates not determined as distance was provided" };
+
+  } else {
+    logger.info('Distance not provided/invalid, attempting geocoding (Nominatim) and routing (OSRM)...');
+    distanceSource = 'api_calculated';
+
+    if (!originCoords || typeof originCoords.lat !== 'number' || typeof originCoords.lng !== 'number') {
+      logger.info('Origin coordinates missing or invalid, calling Nominatim for "from" address', { from });
+      originCoords = await getCoordinatesFromAddressNominatim(from);
+      if (!originCoords) {
+        throw new BadRequestError(`Could not find coordinates for pickup location: "${from}". Please check the address, add more details (like city/state), or provide coordinates directly.`);
+      }
+    } else {
+      logger.info('Origin coordinates provided directly.', { originCoords });
+      distanceSource = 'user_provided_coordinates';
+    }
+
+    if (!destinationCoords || typeof destinationCoords.lat !== 'number' || typeof destinationCoords.lng !== 'number') {
+      logger.info('Destination coordinates missing or invalid, calling Nominatim for "to" address', { to });
+      destinationCoords = await getCoordinatesFromAddressNominatim(to);
+      if (!destinationCoords) {
+        throw new BadRequestError(`Could not find coordinates for drop-off location: "${to}". Please check the address, add more details (like city/state), or provide coordinates directly.`);
+      }
+    } else {
+      logger.info('Destination coordinates provided directly.', { destinationCoords });
+      if (distanceSource !== 'user_provided_distance') distanceSource = 'user_provided_coordinates';
+    }
+
+    logger.info('Calling OSRM for driving distance', { originCoords, destinationCoords });
+    estimatedDistance = await getDrivingDistanceOSRM(originCoords, destinationCoords);
+
+    if (estimatedDistance === null || estimatedDistance < 0) {
+      logger.warn('OSRM failed to return a valid distance, falling back to straight-line calculation.', { originCoords, destinationCoords });
+      try {
+        estimatedDistance = pricingService.calculateDistanceFromCoordinates(originCoords, destinationCoords);
+        distanceSource = 'api_fallback_straight_line';
+        if (estimatedDistance === null || estimatedDistance < 0) {
+          throw new Error("Straight-line distance also invalid.");
+        }
+      } catch (straightLineError) {
+        logger.error("Both OSRM and straight-line distance calculation failed.", { error: straightLineError.message });
+        throw new ServiceUnavailableError('Could not determine the driving distance between the locations. Please try again.');
+      }
+    } else {
+      if (distanceSource !== 'user_provided_coordinates') {
+        distanceSource = 'api_osrm';
+      } else {
+        distanceSource = 'api_osrm_from_user_coords';
+      }
+      logger.info('Distance calculated via OSRM API', { estimatedDistance });
+    }
+  }
+
+  const isAirportTransfer = (type === BOOKING_TYPES.AIRPORT_DROP || type === BOOKING_TYPES.AIRPORT_PICKUP);
+
+  if (!isLocalRental && !isAirportTransfer && (!estimatedDistance || typeof estimatedDistance !== 'number' || estimatedDistance <= 0)) {
+    logger.error("Final estimated distance is invalid for non-local/non-airport trip.", { estimatedDistance, type });
+    throw new BadRequestError('Could not determine a valid distance for this search.');
+  }
+
+  logger.info('Cab search initiated', {
+    from,
+    to,
+    type,
+    distance: estimatedDistance,
+    distanceSource,
+    userId: req.user?._id || 'guest',
+    tripDate: tripDate.toISOString()
+  });
+
+  // Get vehicle options with pricing
+  const vehicleOptions = pricingService.getVehicleOptions(type, {
+    distance: estimatedDistance,
+    startDateTime: tripDate
+  });
+
+  const searchResults = {
+    searchId: generateBookingReference(),
+    from,
+    to,
+    date: tripDate,
+    type,
+    distance: estimatedDistance,
+    distanceSource,
+    options: vehicleOptions,
+    validUntil: addHours(new Date(), 1),
+    timestamp: new Date(),
+    hasCoordinatesInput: !!(req.body.fromCoordinates && req.body.toCoordinates)
+  };
+
+  logger.info('Search results generated', {
+    searchId: searchResults.searchId,
+    optionsCount: vehicleOptions.length,
+    distance: estimatedDistance,
+    distanceSource
+  });
+
+  return sendSuccess(res, searchResults, 'Search results retrieved successfully', 200);
+});
+
+/**
+ * @desc    Create a new booking
  * @route   POST /api/bookings
  * @access  Private
+ * FIXED: Frontend only sends city and address, no coordinates
  */
 export const createBooking = catchAsync(async (req, res) => {
   const {
@@ -362,6 +372,7 @@ export const createBooking = catchAsync(async (req, res) => {
   if (!bookingType || !pickupLocation || !startDateTime || !vehicleType || !fareDetails) {
     throw new BadRequestError('Missing required booking information');
   }
+
   if (typeof pickupLocation !== 'object' || !pickupLocation.city) {
     throw new BadRequestError('Invalid pickupLocation object. "city" is required.');
   }
@@ -369,13 +380,10 @@ export const createBooking = catchAsync(async (req, res) => {
   const isLocalRental = localRentalTypes.includes(bookingType);
 
   if (!isLocalRental) {
-     // Sirf non-local ke liye dropLocation check karo
-     // (Aapke puraane code mein yeh check BOOKING_TYPES.LOCAL_8_80 ke basis par tha, jo ab sahi hai)
-    if (typeof dropLocation !== 'object' || !dropLocation.city) {
+    if (!dropLocation || typeof dropLocation !== 'object' || !dropLocation.city) {
       throw new BadRequestError('Invalid dropLocation object. "city" is required for this booking type.');
     }
   }
-  // Agar local hai, toh dropLocation optional hai (jaisa Booking.js model define karta hai)
 
   if (typeof fareDetails !== 'object' || typeof fareDetails.finalAmount !== 'number') {
     throw new BadRequestError('Invalid fareDetails object. "finalAmount" (number) is required.');
@@ -400,6 +408,7 @@ export const createBooking = catchAsync(async (req, res) => {
     phone: req.user.phoneNumber,
     email: req.user.email
   };
+
   if (passengerDetails) {
     if (!passengerDetails.name || typeof passengerDetails.name !== 'string') {
       throw new BadRequestError('Passenger name is required in passengerDetails.');
@@ -439,7 +448,10 @@ export const createBooking = catchAsync(async (req, res) => {
   const timeBuffer = 30 * 60 * 1000;
   const existingBooking = await Booking.findOne({
     userId: req.user._id,
-    startDateTime: { $gte: new Date(tripDate.getTime() - timeBuffer), $lte: new Date(tripDate.getTime() + timeBuffer) },
+    startDateTime: {
+      $gte: new Date(tripDate.getTime() - timeBuffer),
+      $lte: new Date(tripDate.getTime() + timeBuffer)
+    },
     status: { $nin: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.COMPLETED, BOOKING_STATUS.REJECTED] }
   });
 
@@ -453,6 +465,30 @@ export const createBooking = catchAsync(async (req, res) => {
   }
 
   // ========================================
+  // BUILD CLEAN LOCATION OBJECTS
+  // Frontend only sends: { city: "Mumbai", address: "Gateway of India" }
+  // No coordinates from frontend
+  // ========================================
+  let cleanPickupLocation, cleanDropLocation;
+
+  try {
+    cleanPickupLocation = buildLocationObject(pickupLocation);
+
+    if (isLocalRental) {
+      cleanDropLocation = dropLocation ? buildLocationObject(dropLocation) : buildLocationObject(pickupLocation);
+    } else {
+      cleanDropLocation = buildLocationObject(dropLocation);
+    }
+  } catch (locationError) {
+    logger.error('Error building location objects', {
+      error: locationError.message,
+      pickupLocation,
+      dropLocation
+    });
+    throw new BadRequestError(`Invalid location data: ${locationError.message}`);
+  }
+
+  // ========================================
   // CREATE BOOKING
   // ========================================
   let booking;
@@ -460,12 +496,11 @@ export const createBooking = catchAsync(async (req, res) => {
     booking = await Booking.create({
       userId: req.user._id,
       bookingType,
-      pickupLocation,
-      // NAYA LOGIC: Agar local hai aur dropLocation nahi diya, toh pickupLocation use karo
-      dropLocation: isLocalRental ? (dropLocation || pickupLocation) : dropLocation,
+      pickupLocation: cleanPickupLocation,  // Only city + address (no lat/lng)
+      dropLocation: cleanDropLocation,      // Only city + address (no lat/lng)
       viaLocations: viaLocations || [],
       startDateTime: tripDate,
-      endDateTime: endDateTime ? new Date(endDateTime) : null, // Model hook local ke liye endDateTime set karega
+      endDateTime: endDateTime ? new Date(endDateTime) : null,
       vehicleType,
       passengerDetails: finalPassengerDetails,
       fareDetails,
@@ -483,7 +518,14 @@ export const createBooking = catchAsync(async (req, res) => {
     logger.error('Error saving booking to database', {
       userId: req.user._id,
       error: error.message,
-      bookingData: { bookingType, startDateTime: tripDate, vehicleType }
+      stack: error.stack,
+      bookingData: {
+        bookingType,
+        startDateTime: tripDate,
+        vehicleType,
+        pickupLocation: cleanPickupLocation,
+        dropLocation: cleanDropLocation
+      }
     });
     if (error.name === 'ValidationError') {
       throw new BadRequestError(`Booking validation failed: ${error.message}`);
@@ -508,7 +550,6 @@ export const createBooking = catchAsync(async (req, res) => {
     const latestDevice = user.deviceInfo.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed))[0];
     const fcmToken = latestDevice?.fcmToken;
     if (fcmToken) {
-      // NAYA LOGIC: Local rental ke liye drop location message me mat dikhao (ya "Local Ride" dikhao)
       const dropOffText = isLocalRental ? 'local ride' : (booking.dropLocation ? `to ${booking.dropLocation.city}` : 'ride');
       sendBookingNotification(
         fcmToken,
@@ -541,7 +582,7 @@ export const createBooking = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Get booking by ID (Unchanged)
+ * @desc    Get booking by ID
  * @route   GET /api/bookings/:id
  * @access  Private
  */
@@ -562,16 +603,18 @@ export const getBooking = catchAsync(async (req, res) => {
     });
     throw new NotFoundError('Booking not found');
   }
+
   logger.info('Booking retrieved by DB ID', {
     bookingId: booking.bookingId,
     dbId: booking._id,
     userId: req.user._id
   });
+
   return sendSuccess(res, booking.toObject({ virtuals: true }), 'Booking retrieved successfully', 200);
 });
 
 /**
- * @desc    Get booking by booking code (Unchanged)
+ * @desc    Get booking by booking code
  * @route   GET /api/bookings/code/:bookingId
  * @access  Private
  */
@@ -580,6 +623,7 @@ export const getBookingByCode = catchAsync(async (req, res) => {
   if (!bookingCode) {
     throw new BadRequestError("Booking code parameter is required.");
   }
+
   const booking = await Booking.findOne({
     bookingId: bookingCode,
     userId: req.user._id
@@ -595,17 +639,18 @@ export const getBookingByCode = catchAsync(async (req, res) => {
     });
     throw new NotFoundError(`Booking with code ${bookingCode} not found`);
   }
+
   logger.info('Booking retrieved by code', {
     bookingId: booking.bookingId,
     dbId: booking._id,
     userId: req.user._id
   });
+
   return sendSuccess(res, booking.toObject({ virtuals: true }), 'Booking retrieved successfully', 200);
 });
 
-
 /**
- * @desc    Get all bookings for current user (Unchanged)
+ * @desc    Get all bookings for current user
  * @route   GET /api/bookings
  * @access  Private
  */
@@ -625,6 +670,7 @@ export const getAllBookings = catchAsync(async (req, res) => {
       query.status = { $in: statuses };
     }
   }
+
   if (bookingType) {
     const type = bookingType.trim().toUpperCase();
     if (!Object.values(BOOKING_TYPES).includes(type)) {
@@ -632,6 +678,7 @@ export const getAllBookings = catchAsync(async (req, res) => {
     }
     query.bookingType = type;
   }
+
   if (fromDate || toDate) {
     query.startDateTime = {};
     if (fromDate) {
@@ -656,12 +703,14 @@ export const getAllBookings = catchAsync(async (req, res) => {
       throw new BadRequestError('fromDate cannot be after toDate.');
     }
   }
+
   const allowedSortFields = {
     'createdAt': 1, '-createdAt': -1,
     'startDateTime': 1, '-startDateTime': -1,
     'fare': 'fareDetails.finalAmount', '-fare': '-fareDetails.finalAmount',
     'status': 1, '-status': -1
   };
+
   let sortQuery = { createdAt: -1 };
   if (allowedSortFields[sortBy]) {
     if (typeof allowedSortFields[sortBy] === 'number') {
@@ -705,7 +754,7 @@ export const getAllBookings = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Cancel a booking by the user (Unchanged)
+ * @desc    Cancel a booking by the user
  * @route   PATCH /api/bookings/:id/cancel
  * @access  Private
  */
@@ -728,6 +777,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
     BOOKING_STATUS.CONFIRMED,
     BOOKING_STATUS.ASSIGNED
   ];
+
   if (!cancellableStatuses.includes(booking.status)) {
     throw new BadRequestError(
       `Cannot cancel booking. Current status is: ${booking.status}.`
@@ -740,7 +790,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
 
   if (hoursUntilStart < BOOKING_CONFIG.CANCELLATION_WINDOW_HOURS && hoursUntilStart >= 0) {
     cancellationCharge = Math.round(
-      (booking.fareDetails.finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT) // Already 20, no need /100
+      (booking.fareDetails.finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT)
     );
     chargeApplied = true;
   }
@@ -766,7 +816,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
     hoursUntilStart: hoursUntilStart.toFixed(2),
   });
 
-  // 1. Notify User
+  // Notify User
   const user = booking.userId;
   if (user?.deviceInfo?.length > 0) {
     const latestDevice = user.deviceInfo.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed))[0];
@@ -781,7 +831,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
     }
   }
 
-  // 2. Notify Driver
+  // Notify Driver
   const driver = booking.driverId;
   if (driver) {
     if (driver.deviceInfo?.length > 0) {
@@ -800,7 +850,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
     }
   }
 
-  // 3. Handle Refunds
+  // Handle Refunds
   let refundAmount = 0;
   let refundNote = 'No refund applicable.';
   if ((booking.paymentStatus === PAYMENT_STATUS.COMPLETED || booking.paymentStatus === PAYMENT_STATUS.PROCESSING) &&
@@ -812,7 +862,6 @@ export const cancelBooking = catchAsync(async (req, res) => {
         ? `₹${cancellationCharge} cancellation charge applied. Refund of ₹${refundAmount} initiated.`
         : `Full refund of ₹${booking.fareDetails.finalAmount} initiated.`;
       logger.info('Refund initiation required', { bookingId: booking.bookingId, refundAmount });
-      // ** Trigger actual refund process here **
     } else {
       refundNote = `Cancellation charge (₹${cancellationCharge}) equals or exceeds the paid amount. No refund due.`;
     }
@@ -839,7 +888,7 @@ export const cancelBooking = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Add rating to a completed booking (Unchanged)
+ * @desc    Add rating to a completed booking
  * @route   POST /api/bookings/:id/rating
  * @access  Private
  */
@@ -857,7 +906,7 @@ export const addRating = catchAsync(async (req, res) => {
   const booking = await Booking.findOne({
     _id: bookingId,
     userId: req.user._id
-  }).populate('driverId', 'rating completedRides'); // Assuming driverId refers to User model
+  }).populate('driverId', 'rating completedRides');
 
   if (!booking) {
     throw new NotFoundError('Booking not found or you cannot rate it.');
@@ -890,15 +939,11 @@ export const addRating = catchAsync(async (req, res) => {
   // Update Driver's Overall Rating
   if (booking.driverId) {
     try {
-      // Find the driver (User model) again to ensure fresh data for calculation
       const driver = await User.findById(booking.driverId._id);
       if (driver) {
-        const currentTotalRides = driver.completedRides || 1; // Use 1 to avoid division by 0 if 0
+        const currentTotalRides = driver.completedRides || 1;
         const currentRating = driver.rating || 0;
-        
-        // Calculate new average
-        // (current_avg * (total_rides - 1) + new_rating) / total_rides
-        // This assumes completedRides was incremented when trip status changed to COMPLETED
+
         const newAverageRating = ((currentRating * (currentTotalRides - 1)) + intRating) / currentTotalRides;
 
         driver.rating = Math.round(newAverageRating * 10) / 10;
@@ -932,8 +977,11 @@ export const addRating = catchAsync(async (req, res) => {
   );
 });
 
-
-// --- Deprecated Stubs (Unchanged) ---
+/**
+ * @desc    Get upcoming bookings (Deprecated - redirects to getAllBookings)
+ * @route   GET /api/bookings/upcoming
+ * @access  Private
+ */
 export const getUpcomingBookings = catchAsync(async (req, res) => {
   logger.warn("Deprecated route /api/bookings/upcoming accessed.");
   req.query.status = `${BOOKING_STATUS.CONFIRMED},${BOOKING_STATUS.ASSIGNED}`;
@@ -941,20 +989,31 @@ export const getUpcomingBookings = catchAsync(async (req, res) => {
   req.query.sortBy = 'startDateTime';
   return getAllBookings(req, res);
 });
+
+/**
+ * @desc    Get booking history (Deprecated - redirects to getAllBookings)
+ * @route   GET /api/bookings/history
+ * @access  Private
+ */
 export const getBookingHistory = catchAsync(async (req, res) => {
   logger.warn("Deprecated route /api/bookings/history accessed.");
   req.query.status = `${BOOKING_STATUS.COMPLETED},${BOOKING_STATUS.CANCELLED}`;
   req.query.sortBy = '-startDateTime';
   return getAllBookings(req, res);
 });
+
+/**
+ * @desc    Get booking stats (Deprecated)
+ * @route   GET /api/bookings/stats
+ * @access  Private
+ */
 export const getBookingStats = catchAsync(async (req, res) => {
   logger.warn("Deprecated route /api/bookings/stats accessed.");
   return sendSuccess(res, { note: "Please use /api/users/me/stats for user statistics." }, "Endpoint deprecated", 200);
 });
 
-
 /**
- * @desc    Apply discount code to booking (Unchanged)
+ * @desc    Apply discount code to booking
  * @route   POST /api/bookings/:id/apply-discount
  * @access  Private
  */
@@ -986,9 +1045,10 @@ export const applyDiscount = catchAsync(async (req, res) => {
     discountCode: cleanDiscountCode
   });
 
-  // --- Discount Validation & Application Logic (Placeholder) ---
+  // Discount Validation & Application Logic
   let discountAmount = 0;
   let discountType = null;
+
   if (cleanDiscountCode === 'FIRST100') {
     const pastBookings = await Booking.countDocuments({ userId: req.user._id, status: BOOKING_STATUS.COMPLETED });
     if (pastBookings === 0) {
@@ -1004,6 +1064,7 @@ export const applyDiscount = catchAsync(async (req, res) => {
   } else {
     throw new BadRequestError(`Invalid or expired discount code: "${discountCode}"`);
   }
+
   if (discountAmount <= 0) {
     throw new BadRequestError('Discount code is valid but resulted in no discount amount.');
   }
@@ -1050,7 +1111,7 @@ export const applyDiscount = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Get fare estimate for a route (Updated)
+ * @desc    Get fare estimate for a route
  * @route   POST /api/bookings/estimate-fare
  * @access  Public
  */
@@ -1058,14 +1119,11 @@ export const getFareEstimate = catchAsync(async (req, res) => {
   const { from, to, type, distance, vehicleType, startDateTime, fromCoordinates, toCoordinates } = req.body;
 
   let estimatedDistance = distance;
-  // --- NAYA LOGIC: Check if it's a local rental ---
   const isLocalRental = localRentalTypes.includes(type);
 
   if (isLocalRental) {
-    // Local rental ke liye distance 0 set karo
     estimatedDistance = 0;
-  } else if (!estimatedDistance || typeof estimatedDistance !== 'number' || estimatedDistance < 0) { // Allow 0 for airport
-    // Puraana logic: distance calculate karo
+  } else if (!estimatedDistance || typeof estimatedDistance !== 'number' || estimatedDistance < 0) {
     if (fromCoordinates && toCoordinates && typeof fromCoordinates.lat === 'number' && typeof toCoordinates.lat === 'number') {
       try {
         estimatedDistance = await getDrivingDistanceOSRM(fromCoordinates, toCoordinates) ||
@@ -1093,18 +1151,14 @@ export const getFareEstimate = catchAsync(async (req, res) => {
         throw new BadRequestError(`Could not automatically determine distance: ${distError.message}.`);
       }
     } else if (type !== BOOKING_TYPES.AIRPORT_DROP && type !== BOOKING_TYPES.AIRPORT_PICKUP) {
-        // Sirf airport ke alawa (non-local) trips ke liye distance zaroori hai
-        throw new BadRequestError('Please provide distance, valid coordinates, or both from/to addresses for estimation.');
+      throw new BadRequestError('Please provide distance, valid coordinates, or both from/to addresses for estimation.');
     }
-    // Agar airport hai aur distance nahi hai, toh estimatedDistance 0 rahega
-    if(estimatedDistance === null) estimatedDistance = 0;
+    if (estimatedDistance === null) estimatedDistance = 0;
   }
 
-  // --- NAYA LOGIC: Final check on distance value ---
   const isAirportTransfer = (type === BOOKING_TYPES.AIRPORT_DROP || type === BOOKING_TYPES.AIRPORT_PICKUP);
 
   if (!isLocalRental && !isAirportTransfer && (!estimatedDistance || typeof estimatedDistance !== 'number' || estimatedDistance <= 0)) {
-    // Sirf ONE_WAY aur ROUND_TRIP ke liye 0 se zyada distance zaroori hai
     throw new BadRequestError('Invalid or zero distance determined for estimation.');
   }
 
@@ -1132,7 +1186,6 @@ export const getFareEstimate = catchAsync(async (req, res) => {
       case BOOKING_TYPES.ROUND_TRIP:
         fareDetails = pricingService.calculateOutstationFare(vehicleType, estimatedDistance, true, tripDate);
         break;
-      // Naye local packages
       case BOOKING_TYPES.LOCAL_8_80:
         fareDetails = pricingService.calculateLocalPackageFare(vehicleType, '8_80');
         break;
@@ -1182,7 +1235,7 @@ export const getFareEstimate = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Get cancellation charges for a specific booking (Unchanged)
+ * @desc    Get cancellation charges for a specific booking
  * @route   GET /api/bookings/:id/cancellation-charges
  * @access  Private
  */
@@ -1212,7 +1265,7 @@ export const getCancellationCharges = catchAsync(async (req, res) => {
     const finalAmount = booking.fareDetails?.finalAmount || 0;
     if (finalAmount > 0) {
       cancellationCharge = Math.round(
-        (finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT) // 20%
+        (finalAmount * BOOKING_CONFIG.CANCELLATION_CHARGE_PERCENT)
       );
       chargeWillApply = true;
       chargeReason = `Charge applies as cancellation would be within ${BOOKING_CONFIG.CANCELLATION_WINDOW_HOURS} hours of pickup.`;
@@ -1263,7 +1316,7 @@ export const getCancellationCharges = catchAsync(async (req, res) => {
 });
 
 /**
- * @desc    Update booking status (Unchanged)
+ * @desc    Update booking status
  * @route   PATCH /api/bookings/:id/status
  * @access  Private (Needs role restriction in ROUTE)
  */
@@ -1277,7 +1330,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
 
   const booking = await Booking.findById(bookingId)
     .populate('userId', 'deviceInfo name')
-    .populate('driverId', 'deviceInfo name'); // Assuming driverId refers to User model
+    .populate('driverId', 'deviceInfo name');
 
   if (!booking) {
     throw new NotFoundError(`Booking with ID ${bookingId} not found`);
@@ -1292,13 +1345,12 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
   }
 
   const currentStatus = booking.status;
-  // (Yahaan ek poora status transition state machine hona chahiye)
-  // Simple check:
-  if(currentStatus === BOOKING_STATUS.COMPLETED || currentStatus === BOOKING_STATUS.CANCELLED || currentStatus === BOOKING_STATUS.REJECTED) {
-      throw new BadRequestError(`Booking is already in a final state (${currentStatus}) and cannot be changed.`);
+
+  if (currentStatus === BOOKING_STATUS.COMPLETED || currentStatus === BOOKING_STATUS.CANCELLED || currentStatus === BOOKING_STATUS.REJECTED) {
+    throw new BadRequestError(`Booking is already in a final state (${currentStatus}) and cannot be changed.`);
   }
 
-  // --- Update Timestamps & Trip Details ---
+  // Update Timestamps & Trip Details
   const now = new Date();
   if (status === BOOKING_STATUS.IN_PROGRESS && !booking.trip?.actualStartTime) {
     if (!booking.trip) booking.trip = {};
@@ -1317,7 +1369,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
       cancelledBy: req.user.role,
       cancelledAt: now,
       reason: reason || `Cancelled by ${req.user.role}`,
-      charge: 0 // Admin/Driver cancellation policy
+      charge: 0
     };
   }
 
@@ -1333,11 +1385,11 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     updatedById: req.user._id
   });
 
-  // --- Send Notifications ---
+  // Send Notifications
   const user = booking.userId;
   const driver = booking.driverId;
 
-  // A. Notify User
+  // Notify User
   if (user?.deviceInfo?.length > 0) {
     const latestUserDevice = user.deviceInfo.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed))[0];
     const userFcmToken = latestUserDevice?.fcmToken;
@@ -1354,7 +1406,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     }
   }
 
-  // B. Notify Driver
+  // Notify Driver
   if (driver?.deviceInfo?.length > 0) {
     const latestDriverDevice = driver.deviceInfo.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed))[0];
     const driverFcmToken = latestDriverDevice?.fcmToken;
@@ -1385,8 +1437,9 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
 });
 
 // ========================================
-// FINAL EXPORT BLOCK (Unchanged)
+// EXPORTS
 // ========================================
+
 export default {
   searchCabs,
   createBooking,
@@ -1403,4 +1456,3 @@ export default {
   getCancellationCharges,
   updateBookingStatus
 };
-
